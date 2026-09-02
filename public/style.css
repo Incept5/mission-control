@@ -471,6 +471,7 @@ body {
   font-size: 15px; line-height: 1;
   flex-shrink: 0;
 }
+.new-session-btn { font-size: 12px; white-space: nowrap; }
 .attach-row {
   display: flex; gap: 8px; flex-wrap: wrap;
   padding: 0 24px;
@@ -1000,3 +1001,51 @@ body {
 ::-webkit-scrollbar { width: 10px; height: 10px; }
 ::-webkit-scrollbar-thumb { background: var(--border-bright); border-radius: 6px; }
 ::-webkit-scrollbar-track { background: transparent; }
+
+/* ── File tree (Workspace tab + Chat files panel) ────────────────── */
+.ftree { flex: 1; overflow: auto; padding: 6px; }
+.ftree-row {
+  display: flex; align-items: center; gap: 6px;
+  padding: 5px 8px; border-radius: 8px;
+  cursor: pointer; color: var(--text-dim);
+  font-family: var(--mono); font-size: 12.5px;
+  white-space: nowrap; overflow: hidden; user-select: none;
+}
+.ftree-row:hover { background: var(--panel-2); color: var(--text); }
+.ftree-row.selected { background: var(--panel-2); color: var(--accent); }
+.ftree-row.dim { opacity: .55; }
+.ftree-row.dragging { opacity: .4; }
+.ftree-caret { width: 10px; flex-shrink: 0; color: var(--text-faint); font-size: 10px; }
+.ftree-icon { flex-shrink: 0; }
+.ftree-row .name { flex: 1; overflow: hidden; text-overflow: ellipsis; }
+.ftree-row .size { font-size: 10.5px; color: var(--text-faint); }
+.ftree-add {
+  visibility: hidden; flex-shrink: 0;
+  width: 18px; height: 18px; padding: 0; line-height: 1;
+  border: 1px solid var(--border-bright); border-radius: 6px;
+  background: var(--panel); color: var(--text-dim);
+  cursor: pointer; font-size: 12px;
+}
+.ftree-row:hover .ftree-add { visibility: visible; }
+.ftree-add:hover { color: var(--green); border-color: var(--green); }
+.ftree-note { padding: 4px 8px; font-family: var(--mono); font-size: 11px; color: var(--text-faint); }
+.ws-tree-hint {
+  padding: 6px 14px; font-size: 11px; line-height: 1.4; color: var(--text-faint);
+  border-bottom: 1px solid var(--border);
+}
+
+/* Chat tab with the files panel open */
+.chat-split { display: flex; height: 100%; }
+.chat-split .chat-wrap { flex: 1; min-width: 0; }
+.chat-files {
+  width: 280px; flex-shrink: 0;
+  border-left: 1px solid var(--border);
+  display: flex; flex-direction: column;
+  background: rgba(0, 0, 0, .12);
+}
+.composer-btn.active { border-color: var(--accent); color: var(--accent); }
+.chat-wrap.drop-ref .composer textarea {
+  border-color: var(--green);
+  box-shadow: 0 0 0 3px rgba(52, 211, 153, .15);
+}
+.attach-chip.ref { border-color: rgba(52, 211, 153, .35); }

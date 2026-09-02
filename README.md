@@ -33,8 +33,10 @@ Then open **http://localhost:1969** (Apollo 11 vintage — override with `PORT=x
   It's informational only — nothing alerts when a run overshoots.
 - **Per-agent Chat** — a streaming chat panel. For Claude Code you see its
   tool calls (⚙ chips) and results (✓ chips) live as it works.
-- **Per-agent Workspace** — browse, view, create, and edit files in the agent's
-  working directory (`workspaces/<agent-id>/`). The agent runs with this
+- **Per-agent Workspace** — a folder tree of the agent's working directory
+  (`workspaces/<agent-id>/`, or the project root when a project is selected):
+  expand folders in place, view, create, and edit files. "💬 Ask in chat" on an
+  open file adds it to the next chat message. The agent runs with this
   directory as its cwd, so anything it builds shows up here.
 - **Per-agent Control Room** — model & permission-mode settings, session info,
   abort / new session / clear history, and a raw telemetry event stream.
@@ -43,9 +45,15 @@ Then open **http://localhost:1969** (Apollo 11 vintage — override with `PORT=x
 
 - **Live streaming** — assistant text streams word-by-word (▊ cursor) and is
   replaced by the final message when the turn completes.
-- **Attachments** — paste, drag-drop, or 📎 files/images into the composer
-  (20MB max each). They're saved under `.attachments/` in the agent's current
-  workspace and the message tells the agent to read them for context.
+- **Project files as context** — 🗂 in the composer opens a file tree of the
+  agent's current workspace beside the chat. Drag any file or folder into the
+  message (or hover a row and press +) to stage it as a reference chip; the
+  sent message lists the absolute paths and tells the agent to read them, so
+  you can drop in a document and ask questions about it. Folders are listed
+  as such so the agent explores them first. Nothing is copied.
+- **Attachments** — paste, drag-drop from the OS, or 📎 files/images into the
+  composer (20MB max each). They're saved under `.attachments/` in the agent's
+  current workspace and the message tells the agent to read them for context.
 - **Prompt library** — ☰ in the composer lists saved prompts (global or scoped
   to the agent's current project) and inserts them; "Manage prompts…" adds,
   edits, and deletes (stored in `data/prompts.json`).
@@ -142,7 +150,7 @@ agent at a project from the dropdown in the agent's header:
 
 - The agent runs with the project root as its working directory, so it picks up
   that project's own `CLAUDE.md`, `.claude/` config, and memory automatically.
-- The Workspace tab browses the project root.
+- The Workspace tab and the chat's 🗂 files panel browse the project root.
 - Each project keeps its own session per agent — switch away and back and the
   agent resumes the conversation where it left off.
 - Removing a project only unregisters it; files on disk are never touched.
@@ -163,6 +171,48 @@ resuming the previous session ID so the conversation is continuous. The default
 permission mode is **Accept edits**; switch to **Bypass permissions** in the
 Control Room if you want it to run shell commands autonomously (understand the
 risk first — it will act without asking).
+
+## Claude Code as a harness for other models
+
+Any provider that speaks the Anthropic Messages API (z.ai GLM, Moonshot Kimi,
+DeepSeek, a local Ollama, …) can sit behind the `claude` binary. Add a second
+`claude-code` entry to `agents.config.js` with two extra fields:
+
+```js
+{
+  id: 'glm', name: 'GLM 5.3', type: 'claude-code', accent: '#5eb0ff',
+  description: 'Claude Code harness on z.ai GLM models',
+  env: {
+    ANTHROPIC_BASE_URL: 'https://api.z.ai/api/anthropic',
+    ANTHROPIC_AUTH_TOKEN: { file: '~/.config/zai/token' },   // read at spawn time
+    ANTHROPIC_DEFAULT_OPUS_MODEL: 'glm-5.3',
+    ANTHROPIC_DEFAULT_SONNET_MODEL: 'glm-5.3',
+    ANTHROPIC_DEFAULT_HAIKU_MODEL: 'GLM-4.5-Air',
+  },
+  models: [{ value: 'glm-5.3', label: 'GLM 5.3' }],
+}
+```
+
+- **`env`** is merged into the spawned CLI's environment. A value of
+  `{ file: '~/path' }` is read from disk on every run, so secrets stay out of
+  the config file (put the key in a `chmod 600` file). If the file is missing
+  or empty the run fails immediately with a clear error in the chat. Env values
+  are never sent to the browser — the agent list only shows which keys are set.
+- **`models`** replaces the Sonnet/Opus/Haiku choices in the Control Room and
+  header dropdown; the value goes to `claude --model`. Map the built-in aliases
+  with `ANTHROPIC_DEFAULT_*_MODEL` too, since sub-agents still use them.
+
+- **`pricing`** fixes cost tracking. Claude Code prices every run at Anthropic
+  rates whatever the backend, so declare how the provider really bills:
+  `{ plan: 'GLM Coding Plan', monthly: 18 }` for a flat subscription (runs
+  record $0 and the chat shows the plan name), or
+  `{ perMillion: { input, output, cacheRead, cacheWrite } }` in USD per
+  million tokens for pay-as-you-go APIs. The CLI's own estimate is kept on each
+  result as `reported_cost_usd`.
+
+Each such agent gets its own workspace, session history, and settings, so an
+Anthropic-backed and a GLM-backed Claude Code can run side by side. Commented
+examples for Kimi, DeepSeek and Ollama are in `agents.config.js`.
 
 ## Agent types
 

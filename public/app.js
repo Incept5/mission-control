@@ -9,6 +9,8 @@ const state = {
   histories: {},         // agentId -> [events]
   tab: 'chat',           // active tab on agent pages
   wsFile: {},            // agentId -> { dir, selected, dirty }
+  fileTree: {},          // agentId -> { expanded:Set, root, selected } (file trees)
+  attach: {},            // agentId -> staged uploads / file references for the next message
   sessionSel: {},        // agentId -> selected session cid
   agentProj: {},         // agentId -> last seen project id (change detection)
   agentCid: {},          // agentId -> last seen conversation id
@@ -1490,7 +1492,10 @@ function onStatusChanged(agentId) {
   const cidChanged = (st.cid || null) !== (state.agentCid[agentId] ?? (st.cid || null));
   state.agentProj[agentId] = st.project?.id || null;
   state.agentCid[agentId] = st.cid || null;
-  if (projChanged) state.wsFile[agentId] = { dir: '', selected: null };
+  if (projChanged) {
+    state.wsFile[agentId] = { dir: '', selected: null };
+    state.fileTree[agentId] = null;
+  }
 
   if (currentAgentId() === agentId) {
     const dot = $('#hdr-dot');
@@ -1536,11 +1541,50 @@ function updatePartialBubble(text) {
   if (nearBottom) log.scrollTop = log.scrollHeight;
 }
 
+const REF_MIME = 'application/x-mission-control-ref';
+
+// Files staged for the next message. Two kinds: uploads copied into
+// `.attachments/` via the 📎 button / paste / OS drop, and references to
+// files or folders already in the workspace (dragged from a file tree).
+function stagedFor(agent) {
+  return (state.attach ||= {})[agent.id] ||= [];
+}
+
+function stageRef(agent, ref) {
+  const staged = stagedFor(agent);
+  if (staged.some((a) => a.path === ref.path)) return false;
+  staged.push({ name: ref.name, path: ref.path, type: ref.type || 'file', kind: 'ref' });
+  renderAttachChips(agent);
+  return true;
+}
+
+function renderAttachChips(agent) {
+  const row = $('#attach-row');
+  if (!row) return;
+  const staged = stagedFor(agent);
+  row.replaceChildren(
+    ...staged.map((a, i) =>
+      el('span', { class: 'attach-chip' + (a.kind === 'ref' ? ' ref' : ''), title: a.path },
+        (a.kind === 'ref' ? (a.type === 'dir' ? '📁 ' : '📄 ') : '📎 ') + a.name,
+        el('button', { class: 'attach-x', onclick: () => { staged.splice(i, 1); renderAttachChips(agent); } }, '✕'),
+      ))
+  );
+}
+
+function readRef(dt) {
+  try {
+    const raw = dt?.getData(REF_MIME);
+    return raw ? JSON.parse(raw) : null;
+  } catch {
+    return null;
+  }
+}
+
 function renderChat(agent, body) {
   const log = el('div', { class: 'chat-log', id: 'chat-log' });
   const workingSlot = el('div', { id: 'working-slot' });
   const attachRow = el('div', { class: 'attach-row', id: 'attach-row' });
-  const staged = (state.attach ||= {})[agent.id] ||= [];
+  const staged = stagedFor(agent);
   const input = el('textarea', {
     placeholder: `Message ${agent.name}…  (Enter to send, Shift+Enter for newline, paste/drop files to attach)`,
     rows: '1',
@@ -1556,16 +1600,6 @@ function renderChat(agent, body) {
     input.style.height = Math.min(input.scrollHeight, 160) + 'px';
   });
   const sendBtn = el('button', { class: 'btn primary', onclick: submit }, 'Send');
-
-  function renderAttachChips() {
-    attachRow.replaceChildren(
-      ...staged.map((a, i) =>
-        el('span', { class: 'attach-chip' },
-          '📎 ' + a.name,
-          el('button', { class: 'attach-x', onclick: () => { staged.splice(i, 1); renderAttachChips(); } }, '✕'),
-        ))
-    );
-  }
 
   async function uploadFile(file) {
     if (file.size > 20 * 1024 * 1024) return toast(`${file.name}: too large (20MB max)`, true);
@@ -1583,11 +1617,11 @@ function renderChat(agent, body) {
         method: 'POST',
         body: { name: file.name, dataBase64 },
       });
-      staged.push({ name: saved.name, path: saved.path });
+      staged.push({ name: saved.name, path: saved.path, type: 'file', kind: 'upload' });
     } catch (err) {
       toast(`${file.name}: ${err.message}`, true);
     }
-    renderAttachChips();
+    renderAttachChips(agent);
   }
 
   input.addEventListener('paste', (e) => {
@@ -1606,6 +1640,16 @@ function renderChat(agent, body) {
       picker.click();
     },
   }, '📎');
+
+  const filesOpen = localStorage.getItem('mc.chatFiles') === '1';
+  const filesBtn = el('button', {
+    class: 'btn composer-btn' + (filesOpen ? ' active' : ''),
+    title: filesOpen ? 'Hide project files' : 'Show project files — drag a file or folder into the message',
+    onclick: () => {
+      localStorage.setItem('mc.chatFiles', filesOpen ? '0' : '1');
+      renderChat(agent, body);
+    },
+  }, '🗂');
 
   const promptsBtn = el('button', {
     class: 'btn composer-btn', title: 'Prompt library',
@@ -1628,13 +1672,27 @@ function renderChat(agent, body) {
     },
   }, '☰');
 
+  const newSessionBtn = el('button', {
+    class: 'btn composer-btn new-session-btn', title: 'Start a new session (keeps history in the Sessions tab)',
+    onclick: async () => {
+      if (agent.status?.state === 'working' &&
+          !confirm('The agent is mid-run. Start a new session anyway?')) return;
+      try {
+        await api(`/api/agents/${agent.id}/session/clear`, { method: 'POST' });
+        toast('New session started');
+      } catch (err) {
+        toast(err.message, true);
+      }
+    },
+  }, '✦ New session');
+
   async function submit() {
     let text = input.value.trim();
     if (!text && !staged.length) return;
     if (staged.length) {
       text += (text ? '\n\n' : '') +
-        'Attached files (read them with your Read tool for context):\n' +
-        staged.map((a) => '- ' + a.path).join('\n');
+        'Files and folders for context (read files with your Read tool; list a folder before reading inside it):\n' +
+        staged.map((a) => '- ' + a.path + (a.type === 'dir' ? '/' : '')).join('\n');
     }
     try {
       const result = await api(`/api/agents/${agent.id}/chat`, { method: 'POST', body: { message: text } });
@@ -1642,7 +1700,7 @@ function renderChat(agent, body) {
       input.value = '';
       input.style.height = 'auto';
       staged.length = 0;
-      renderAttachChips();
+      renderAttachChips(agent);
     } catch (err) {
       toast(err.message, true);
     }
@@ -1653,15 +1711,33 @@ function renderChat(agent, body) {
     workingSlot,
     el('div', { id: 'queue-slot' }),
     attachRow,
-    el('div', { class: 'composer' }, attachBtn, promptsBtn, input, sendBtn),
+    el('div', { class: 'composer' }, newSessionBtn, attachBtn, filesBtn, promptsBtn, input, sendBtn),
   );
-  wrap.addEventListener('dragover', (e) => { e.preventDefault(); });
+  // Drop targets: a row dragged from a file tree becomes a reference chip;
+  // anything else (files from the OS) is uploaded as an attachment.
+  wrap.addEventListener('dragover', (e) => {
+    e.preventDefault();
+    if ([...(e.dataTransfer?.types || [])].includes(REF_MIME)) {
+      e.dataTransfer.dropEffect = 'copy';
+      wrap.classList.add('drop-ref');
+    }
+  });
+  wrap.addEventListener('dragleave', (e) => {
+    if (!wrap.contains(e.relatedTarget)) wrap.classList.remove('drop-ref');
+  });
   wrap.addEventListener('drop', (e) => {
     e.preventDefault();
+    wrap.classList.remove('drop-ref');
+    const ref = readRef(e.dataTransfer);
+    if (ref) {
+      stageRef(agent, ref);
+      input.focus();
+      return;
+    }
     [...(e.dataTransfer?.files || [])].forEach(uploadFile);
   });
-  body.replaceChildren(wrap);
-  renderAttachChips();
+  body.replaceChildren(filesOpen ? el('div', { class: 'chat-split' }, wrap, chatFilesPanel(agent, input, filesBtn)) : wrap);
+  renderAttachChips(agent);
 
   // Chat shows the active session only; older sessions live in the Sessions tab.
   const cid = agent.status?.cid || null;
@@ -1680,13 +1756,37 @@ function renderChat(agent, body) {
   input.focus();
 }
 
+// Side panel on the Chat tab: the workspace tree, so files and folders can be
+// dragged straight into the message being composed.
+function chatFilesPanel(agent, input, toggleBtn) {
+  const proj = agent.status?.project;
+  const tree = fileTree(agent, {
+    onOpen: (entry) => {
+      (state.wsFile[agent.id] ||= { dir: '', selected: null }).selected = entry.path;
+      state.tab = 'workspace';
+      renderAgentPage(agent);
+    },
+    onAdd: (ref) => { stageRef(agent, ref); input.focus(); },
+  });
+  return el('aside', { class: 'chat-files' },
+    el('div', { class: 'ws-tree-head' },
+      el('span', { class: 'crumb', title: proj?.path || 'agent workspace' }, '🗂 ' + (proj ? proj.name : 'workspace')),
+      el('button', { class: 'btn sm', title: 'Refresh', onclick: () => tree.reload() }, '↻'),
+      el('button', { class: 'btn sm', title: 'Hide', onclick: () => toggleBtn.click() }, '✕'),
+    ),
+    el('div', { class: 'ws-tree-hint' },
+      'Drag a file or folder into the message, or hover a row and press +. Click a file to open it in Workspace.'),
+    tree,
+  );
+}
+
 function updateWorkingBar(agent) {
   const slot = $('#working-slot');
   if (!slot) return;
   const st = agent.status || {};
   if (st.state === 'working') {
     const subs = st.subagents || [];
-    slot.replaceChildren(
+    slot.replaceChildren(...[
       el('div', { class: 'working-bar' },
         el('span', { class: 'spinner' }),
         st.run ? originChip(st.run.origin, 'sm') : null,
@@ -1705,7 +1805,7 @@ function updateWorkingBar(agent) {
             s.description ? el('span', { class: 'sub-desc' }, s.description) : null,
           ))
       ) : null,
-    );
+    ].filter(Boolean));
   } else {
     slot.replaceChildren();
   }
@@ -1883,7 +1983,9 @@ function renderEvent(ev) {
         return el('div', { class: 'meta-line error' }, `✗ run failed (${ev.subtype || 'error'})`);
       }
       const secs = ev.duration_ms ? (ev.duration_ms / 1000).toFixed(1) + 's' : '';
-      const cost = typeof ev.total_cost_usd === 'number' ? `$${ev.total_cost_usd.toFixed(4)}` : '';
+      const cost = ev.cost_basis === 'subscription'
+        ? (ev.plan ? `${ev.plan} (no marginal cost)` : 'included in plan')
+        : typeof ev.total_cost_usd === 'number' ? `${ev.total_cost_usd.toFixed(4)}` : '';
       return el('div', { class: 'meta-line' }, ['✓ done', secs, cost].filter(Boolean).join(' · '));
     }
 
@@ -2388,19 +2490,108 @@ function renderDiffText(text) {
 
 /* ── Workspace tab ───────────────────────────────────────────────── */
 
+/* ── File tree ───────────────────────────────────────────────────── */
+
+// Lazy folder tree over the agent's current workspace (the project root when
+// one is selected). Folders expand in place and remember their state per
+// agent. Every row is draggable onto the chat composer (payload: REF_MIME with
+// the absolute path) and shows a "+" on hover that stages it without dragging.
+function fileTree(agent, { onOpen, onAdd } = {}) {
+  const ft = (state.fileTree[agent.id] ||= { expanded: new Set(), root: null, selected: null });
+  const box = el('div', { class: 'ftree' });
+
+  const absOf = (rel) => (ft.root ? ft.root + (rel ? '/' + rel : '') : rel);
+  const refOf = (entry) => ({ name: entry.name, path: absOf(entry.path), rel: entry.path, type: entry.type });
+  const note = (depth, text) =>
+    el('div', { class: 'ftree-note', style: `padding-left:${18 + depth * 14}px` }, text);
+
+  async function fill(rel, depth, into) {
+    let data;
+    try {
+      data = await api(`/api/agents/${agent.id}/files?path=${encodeURIComponent(rel)}`);
+    } catch (err) {
+      into.replaceChildren(note(depth, err.message));
+      return;
+    }
+    ft.root = data.root || agent.status?.project?.path || ft.root;
+    into.replaceChildren(...data.entries.map((entry) => node(entry, depth)));
+    if (!data.entries.length) into.append(note(depth, '(empty)'));
+  }
+
+  function node(entry, depth) {
+    const isDir = entry.type === 'dir';
+    const children = el('div', { class: 'ftree-children' });
+    const caret = el('span', { class: 'ftree-caret' }, isDir ? '▸' : '');
+    const dim = entry.name.startsWith('.') || entry.name === 'node_modules';
+    const row = el('div', {
+      class: 'ftree-row' + (dim ? ' dim' : '') + (entry.path === ft.selected ? ' selected' : ''),
+      draggable: 'true',
+      'data-path': entry.path,
+      title: entry.path,
+      style: `padding-left:${8 + depth * 14}px`,
+    },
+      caret,
+      el('span', { class: 'ftree-icon' }, isDir ? '📁' : '📄'),
+      el('span', { class: 'name' }, entry.name),
+      isDir ? null : el('span', { class: 'size' }, fmtBytes(entry.size)),
+      onAdd ? el('button', {
+        class: 'ftree-add', title: 'Add to the chat message',
+        onclick: (e) => { e.stopPropagation(); onAdd(refOf(entry)); },
+      }, '+') : null,
+    );
+    const setOpen = (open) => {
+      caret.textContent = open ? '▾' : '▸';
+      children.style.display = open ? '' : 'none';
+      if (open) ft.expanded.add(entry.path);
+      else ft.expanded.delete(entry.path);
+      if (open && !children.childElementCount) fill(entry.path, depth + 1, children);
+    };
+    row.addEventListener('click', () => {
+      if (isDir) setOpen(!ft.expanded.has(entry.path));
+      else if (onOpen) onOpen(entry);
+    });
+    row.addEventListener('dragstart', (e) => {
+      const ref = refOf(entry);
+      e.dataTransfer.setData(REF_MIME, JSON.stringify(ref));
+      e.dataTransfer.setData('text/plain', ref.path);
+      e.dataTransfer.effectAllowed = 'copy';
+      row.classList.add('dragging');
+    });
+    row.addEventListener('dragend', () => row.classList.remove('dragging'));
+    if (isDir) setOpen(ft.expanded.has(entry.path));
+    else children.style.display = 'none';
+    return el('div', { class: 'ftree-node' }, row, children);
+  }
+
+  box.reload = () => fill('', 0, box);
+  box.select = (rel) => {
+    ft.selected = rel;
+    for (const r of box.querySelectorAll('.ftree-row')) r.classList.toggle('selected', r.dataset.path === rel);
+  };
+  box.absOf = absOf;
+  box.reload();
+  return box;
+}
+
+/* ── Workspace tab ───────────────────────────────────────────────── */
+
 function renderWorkspace(agent, body) {
   const ws = (state.wsFile[agent.id] ||= { dir: '', selected: null });
-
-  const list = el('div', { class: 'ws-list', id: 'ws-list' });
-  const crumb = el('span', { class: 'crumb', id: 'ws-crumb' }, '/');
+  const proj = agent.status?.project;
   const editorPane = el('div', { class: 'ws-editor', id: 'ws-editor' });
+  const tree = fileTree(agent, {
+    onOpen: (entry) => openFile(entry.path),
+    onAdd: (ref) => {
+      if (stageRef(agent, ref)) toast(`Added ${ref.name} to the chat message`);
+    },
+  });
 
   body.replaceChildren(
     el('div', { class: 'ws-wrap' },
       el('div', { class: 'ws-tree' },
         el('div', { class: 'ws-tree-head' },
-          crumb,
-          el('button', { class: 'btn sm', onclick: () => loadDir(ws.dir), title: 'Refresh' }, '↻'),
+          el('span', { class: 'crumb', title: proj?.path || 'agent workspace' }, proj ? proj.name : 'workspace'),
+          el('button', { class: 'btn sm', onclick: () => tree.reload(), title: 'Refresh' }, '↻'),
           el('button', {
             class: 'btn sm', title: 'New file',
             onclick: async () => {
@@ -2408,53 +2599,21 @@ function renderWorkspace(agent, body) {
               if (!name) return;
               try {
                 await api(`/api/agents/${agent.id}/file`, { method: 'PUT', body: { path: name, content: '' } });
-                await loadDir(ws.dir);
+                await tree.reload();
                 openFile(name);
               } catch (err) { toast(err.message, true); }
             },
           }, '+'),
         ),
-        list,
+        el('div', { class: 'ws-tree-hint' }, 'Drag a file or folder into the chat, or hover a row and press +'),
+        tree,
       ),
       editorPane,
     )
   );
 
-  showEmptyEditor();
-
-  async function loadDir(dir) {
-    ws.dir = dir;
-    const proj = agent.status?.project;
-    crumb.textContent = `${proj ? proj.name : 'workspace'} /${dir}`;
-    crumb.title = (proj ? proj.path : '') + '/' + dir;
-    let data;
-    try {
-      data = await api(`/api/agents/${agent.id}/files?path=${encodeURIComponent(dir)}`);
-    } catch (err) {
-      toast(err.message, true);
-      return;
-    }
-    const rows = [];
-    if (dir) {
-      const parent = dir.split('/').slice(0, -1).join('/');
-      rows.push(el('div', { class: 'ws-entry', onclick: () => loadDir(parent) },
-        el('span', {}, '↩'), el('span', { class: 'name' }, '..')));
-    }
-    for (const entry of data.entries) {
-      rows.push(
-        el('div', {
-          class: 'ws-entry' + (entry.path === ws.selected ? ' selected' : ''),
-          onclick: () => (entry.type === 'dir' ? loadDir(entry.path) : openFile(entry.path)),
-        },
-          el('span', {}, entry.type === 'dir' ? '📁' : '📄'),
-          el('span', { class: 'name' }, entry.name),
-          entry.type === 'file' ? el('span', { class: 'size' }, fmtBytes(entry.size)) : null,
-        )
-      );
-    }
-    if (!rows.length) rows.push(el('div', { class: 'ws-entry' }, el('span', { class: 'name' }, '(empty)')));
-    list.replaceChildren(...rows);
-  }
+  if (ws.selected) openFile(ws.selected);
+  else showEmptyEditor();
 
   function showEmptyEditor() {
     editorPane.replaceChildren(
@@ -2464,17 +2623,28 @@ function renderWorkspace(agent, body) {
 
   async function openFile(relPath) {
     ws.selected = relPath;
+    tree.select(relPath);
     let data;
     try {
       data = await api(`/api/agents/${agent.id}/file?path=${encodeURIComponent(relPath)}`);
     } catch (err) {
       toast(err.message, true);
+      ws.selected = null;
+      tree.select(null);
+      showEmptyEditor();
       return;
     }
-    await loadDir(ws.dir);
+    const askBtn = el('button', {
+      class: 'btn sm', title: 'Add this file to the chat message and switch to Chat',
+      onclick: () => {
+        stageRef(agent, { name: relPath.split('/').pop(), path: tree.absOf(relPath), type: 'file' });
+        state.tab = 'chat';
+        renderAgentPage(agent);
+      },
+    }, '💬 Ask in chat');
     if (data.binary) {
       editorPane.replaceChildren(
-        el('div', { class: 'ws-editor-head' }, el('span', { class: 'fname' }, relPath)),
+        el('div', { class: 'ws-editor-head' }, el('span', { class: 'fname' }, relPath), askBtn),
         el('div', { class: 'ws-empty' }, `Binary file · ${fmtBytes(data.size)}`),
       );
       return;
@@ -2497,13 +2667,12 @@ function renderWorkspace(agent, body) {
       el('div', { class: 'ws-editor-head' },
         el('span', { class: 'fname' }, relPath),
         data.truncated ? el('span', {}, `(showing first ${fmtBytes(500 * 1024)})`) : null,
+        askBtn,
         saveBtn,
       ),
       ta,
     );
   }
-
-  loadDir(ws.dir);
 }
 
 /* ── Control room tab ────────────────────────────────────────────── */
