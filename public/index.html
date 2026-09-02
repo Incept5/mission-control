@@ -1,0 +1,52 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Mission Control</title>
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🛰️</text></svg>">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;600&family=Inter:wght@400;500;600;700&display=swap">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<div id="app">
+  <aside id="sidebar">
+    <a class="brand" href="#/">
+      <div class="brand-mark">🛰️</div>
+      <div>
+        <div class="brand-name">MISSION CONTROL</div>
+        <div class="brand-sub" id="clock">--:--:--</div>
+      </div>
+    </a>
+    <div class="nav-label">Overview</div>
+    <nav>
+      <a href="#/" class="nav-item" data-route="home">
+        <span class="nav-icon">◈</span> Dashboard
+      </a>
+      <a href="#/board" class="nav-item" data-route="board">
+        <span class="nav-icon">▦</span> Board
+      </a>
+      <a href="#/analytics" class="nav-item" data-route="analytics">
+        <span class="nav-icon">◆</span> Analytics
+      </a>
+      <a href="#/projects" class="nav-item" data-route="projects">
+        <span class="nav-icon">▣</span> Projects
+      </a>
+      <a href="#/alerts" class="nav-item" data-route="alerts">
+        <span class="nav-icon">◉</span> Alerts
+      </a>
+    </nav>
+    <div class="nav-label">Agents</div>
+    <nav id="agent-nav"></nav>
+    <div class="sidebar-foot">
+      <span class="conn-dot" id="conn-dot"></span>
+      <span id="conn-label">connecting…</span>
+    </div>
+  </aside>
+  <main id="main"></main>
+</div>
+<div id="toast"></div>
+<script src="app.js"></script>
+</body>
+</html>

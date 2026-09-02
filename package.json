@@ -1,0 +1,14 @@
+{
+  "name": "mission-control",
+  "version": "1.0.0",
+  "description": "Local mission control dashboard for managing AI agents",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "dependencies": {
+    "express": "^4.19.2",
+    "nodemailer": "^9.1.0",
+    "ws": "^8.18.0"
+  }
+}

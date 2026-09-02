@@ -1,0 +1,20 @@
+# Dependencies
+node_modules/
+
+# Local runtime state: chat history, agent registry, session pointers,
+# notification credentials (Telegram token, SMTP password). Never commit.
+data/
+
+# Per-agent working directories and chat attachments
+workspaces/
+.attachments/
+
+# Per-machine Claude Code permissions
+.claude/settings.local.json
+
+# OS / editor
+.DS_Store
+*.swp
+
+# Local sample project used to exercise the Git tab (has its own .git)
+demo-project/
