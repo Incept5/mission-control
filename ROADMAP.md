@@ -167,7 +167,7 @@ mission control, and how its own work fits the whole.
 
 ## Milestones (in order)
 
-### M12 — Vault core + MCP server
+### M12 — Vault core + MCP server  ✅ shipped 2026-09-03
 - `lib/vault.js`: resolve the vault path from settings, initialize it (git
   repo + `_catalog/`, `_mc/`, `notes/`), validated read/write helpers, index
   builder, auto-commit per write.
@@ -184,6 +184,14 @@ mission control, and how its own work fits the whole.
   (project, path, one-liner, stack tags, status), the current project's own
   catalog page, and three lines of usage instruction — search before
   assuming, write durable learnings, append rather than duplicate.
+- Shipped notes: vault path lives under the reserved `_vault` key in
+  `data/settings.json` (default sibling `../fleet-vault`), with
+  `GET/PUT /api/vault` to inspect/redirect/disable it. Boot seeds a minimal
+  catalog page per registered project so the preamble has an index; M13 owns
+  the refresh/retire lifecycle. The Claude Code path (inline `--mcp-config` +
+  `--append-system-prompt`) is verified end-to-end against the real CLI;
+  the Codex `-c`, Gemini `--mcp-config`, and OpenCode `--config` equivalents
+  follow their docs and remain stub-verified until those CLIs are installed.
 
 ### M13 — Auto-maintained catalog + `_mc/`
 - MC writes and refreshes `_catalog/<slug>.md` per registered project — on

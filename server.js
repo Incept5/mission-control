@@ -138,6 +138,14 @@ app.delete('/api/prompts/:id', wrap((req, res) => {
 
 app.get('/api/analytics', wrap(async (req, res) => res.json(await manager.analytics())));
 
+// Fleet vault: where it lives and whether it's live. Configure via PUT
+// { path, enabled } — stored under the reserved `_vault` key in settings.json.
+app.get('/api/vault', wrap((req, res) => res.json(manager.vaultStatus())));
+
+app.put('/api/vault', wrap(async (req, res) => {
+  res.json(await manager.setVaultSettings(req.body || {}));
+}));
+
 app.get('/api/feed', wrap((req, res) => {
   res.json(manager.feed(Math.min(+req.query.limit || 60, 200)));
 }));

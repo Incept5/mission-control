@@ -169,6 +169,37 @@ agent at a project from the dropdown in the agent's header:
 Project registrations live in `data/projects.json`, per-agent project/session
 pointers in `data/state.json`.
 
+## Fleet vault
+
+Every agent run is granted access to a **shared vault** — a plain Markdown
+folder that is its own git repo, so the fleet builds one common memory instead
+of four separate ones. The vault lives outside this repo (default
+`../fleet-vault`, a sibling); point Mission Control at your own folder — e.g.
+an Obsidian vault — via the `_vault.path` key in `data/settings.json`, or
+`PUT /api/vault {"path": "…"}`. Set `_vault.enabled: false` to turn it off.
+
+Layout: `notes/` for agent-written notes, `_catalog/` for one auto-maintained
+page per registered project, `_mc/` for Mission Control's own distilled
+decisions. Notes carry frontmatter — `type` (project-note | convention |
+decision | gotcha | how-to), `project` (optional), `tags`, `author`,
+`updated` — and sit flat in `notes/`.
+
+At spawn each run gets two things:
+
+- a short **preamble** (fleet catalog, its own project's page, and the three
+  rules: search before assuming, write durable learnings, append rather than
+  duplicate) — via `--append-system-prompt` on Claude Code, prepended to the
+  prompt elsewhere;
+- the **vault MCP server** (`vault_search`, `vault_read`, `vault_write`,
+  `vault_append`) — `--mcp-config` on Claude Code/Gemini, config overrides on
+  Codex/OpenCode. Writes are frontmatter-validated and safe under concurrency.
+
+Every write auto-commits to the vault's git repo, attributed to the writer —
+`agent/<id> (<session>)` for an agent run, `mission-control` for MC itself —
+so git history is the audit log of who wrote what. A run of the same project
+outside Mission Control sees none of this: access exists only where MC
+granted it, and nothing is ever written into your projects' own files.
+
 ## How the Claude Code agent works
 
 Each chat message spawns `claude -p <message> --output-format stream-json`,
@@ -272,7 +303,10 @@ server.js            Express + WebSocket server, JSON API
 agents.config.js     Agent registry
 lib/agent-manager.js Wires adapters to history + broadcasts
 lib/adapters/        One adapter per agent type
+lib/vault.js         Fleet vault core (settings, init, read/write, preamble)
+lib/vault-mcp.js     Stdio MCP server agents get at spawn
 public/              The dashboard UI (vanilla JS, no build step)
 workspaces/          One working directory per agent
 data/                Chat history + settings (gitignore-able)
+../fleet-vault/      The shared vault (own git repo, outside this one)
 ```
