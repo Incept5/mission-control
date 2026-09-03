@@ -117,14 +117,85 @@ Product decisions from the 2026-09-01 planning interview.
 - Single allowed chat ID (already captured by "Detect"); everything else is
   ignored. Long-polling `getUpdates` from the server, no webhook/tunnel.
 
-### M11 — Mission control memory
-- A Markdown memory folder (`data/memory/`) owned by mission control: one file
-  per fact/decision, an index file, plain frontmatter — the same shape as
-  Claude Code's memory so a future Obsidian vault can point at it directly.
-- Scope: only runs and interviews conducted *in the mission-control project*.
-  Registered projects are indexed (name, path, harness summary from M9) so
-  mission control can reason about them, but nothing is written back to them.
-- Dashboard page to browse/edit memories; agents running with mission-control
-  as their project get the folder loaded as context.
-- Vault integration (daily notes, run summaries into the vault) deferred to the
-  vault design session.
+### M11 — Mission control memory  ↦ superseded by Round 3 (M12–M14)
+- Designed as a deliberate placeholder for the fleet vault ("plain Markdown so
+  a future Obsidian vault can point at it directly"). Never shipped: the
+  Round 3 vault subsumes it — one memory system, with mission control's own
+  notes living in the vault's reserved `_mc/` namespace instead of
+  `data/memory/`.
+
+---
+
+# Round 3 — planning interview 2026-09-03
+
+Shared fleet memory: an Obsidian vault every registered agent can query and
+write, so each agent knows what projects exist, how they're set up in
+mission control, and how its own work fits the whole.
+
+## Context from the interview
+
+- The Round 2 asymmetry stands: projects never learn about mission control.
+  MC grants vault access at spawn (context preamble + MCP config) and never
+  edits a project's own files to do it. A run of the same project outside MC
+  sees nothing.
+- Audience is agents only — the user inspects through the dashboard, not by
+  keeping personal notes in the vault.
+- Agent writes go live immediately; no review queue. Git history and the
+  write activity feed are the safety nets.
+- Access is hybrid: a short spawn preamble (catalog + fit + instructions) so
+  every run starts knowing the fleet, plus pull-on-demand MCP tools for
+  everything else.
+
+## Standing decisions (new)
+
+- **One memory system (option c)**: the vault subsumes M11. Reserved
+  namespaces `_catalog/` (auto-maintained project pages) and `_mc/`
+  (mission control's own distilled decisions); agents read everything and
+  write anywhere. Edits to reserved folders are flagged in the activity
+  feed, never blocked.
+- **Vault location**: a sibling directory outside the MC repo, path
+  configured per machine in `data/settings.json` — so any MC user can point
+  at their own personal vault. It is its own git repo (it can't live under
+  `data/`, which is gitignored) and MC auto-commits every write, attributed
+  to the writer (agent + session, or `mission-control`).
+- **Telemetry stays out of the vault**: sessions, costs, run history remain
+  in `data/*.json`. No auto-written run summaries; catalog pages carry only a
+  last-activity stamp.
+- **Retirement over deletion**: unregistering a project marks its catalog
+  page `status: retired`; its notes stay. Staleness handling is just an
+  agent-settable `needs-review` flag surfaced on the Vault page.
+
+## Milestones (in order)
+
+### M12 — Vault core + MCP server
+- `lib/vault.js`: resolve the vault path from settings, initialize it (git
+  repo + `_catalog/`, `_mc/`, `notes/`), validated read/write helpers, index
+  builder, auto-commit per write.
+- `lib/vault-mcp.js`: stateless stdio MCP server, spawned per agent through
+  each adapter's MCP flag (`--mcp-config` for Claude Code, the equivalents
+  for Codex / Gemini / OpenCode). Tools: `vault_search` (full text + tag /
+  type / project filters), `vault_read`, `vault_write` (frontmatter
+  validated), `vault_append` (concurrent-write-safe add to an existing note).
+- Frontmatter on every note: `type` (project-note | convention | decision |
+  gotcha | how-to), `project` (slug, omitted when cross-project), `tags`,
+  `author`, `updated`. Notes sit flat in `notes/`; folder structure can be
+  introduced later if drift demands it.
+- Spawn preamble, capped and rebuilt on every vault write: the catalog index
+  (project, path, one-liner, stack tags, status), the current project's own
+  catalog page, and three lines of usage instruction — search before
+  assuming, write durable learnings, append rather than duplicate.
+
+### M13 — Auto-maintained catalog + `_mc/`
+- MC writes and refreshes `_catalog/<slug>.md` per registered project — on
+  registration, on harness changes (M9's harness summary once it ships;
+  name / path / agents until then), and on run events for the last-activity
+  stamp. Unregister sets `status: retired`.
+- MC distills its own planning interviews and operating decisions into
+  `_mc/` notes (the scope M11 had claimed for `data/memory/`).
+
+### M14 — Vault page in the dashboard
+- File tree over the vault, note viewer/editor, search, and the write
+  activity feed (who / what / when) with one-click git revert of a single
+  write.
+- `needs-review` notes flagged in the list. No per-agent-card vault chips.
+

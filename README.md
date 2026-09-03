@@ -54,6 +54,11 @@ Then open **http://localhost:1969** (Apollo 11 vintage — override with `PORT=x
 - **Attachments** — paste, drag-drop from the OS, or 📎 files/images into the
   composer (20MB max each). They're saved under `.attachments/` in the agent's
   current workspace and the message tells the agent to read them for context.
+- **Slash commands** — type `/` at the start of a message to pick from the
+  skills the agent can run: `.claude/skills` and `.claude/commands` in its
+  current project, the same under `~/.claude`, and whatever the CLI reported
+  in its last session (built-in and plugin skills). Filters as you type;
+  Enter/Tab inserts, Esc dismisses.
 - **Prompt library** — ☰ in the composer lists saved prompts (global or scoped
   to the agent's current project) and inserts them; "Manage prompts…" adds,
   edits, and deletes (stored in `data/prompts.json`).
@@ -207,8 +212,14 @@ DeepSeek, a local Ollama, …) can sit behind the `claude` binary. Add a second
   `{ plan: 'GLM Coding Plan', monthly: 18 }` for a flat subscription (runs
   record $0 and the chat shows the plan name), or
   `{ perMillion: { input, output, cacheRead, cacheWrite } }` in USD per
-  million tokens for pay-as-you-go APIs. The CLI's own estimate is kept on each
-  result as `reported_cost_usd`.
+  million tokens for pay-as-you-go APIs. Give both and runs still bill $0, but
+  each result also carries `estimated_cost_usd` — the same tokens at list
+  price — and the dashboard shows it as "≈$ list" next to actual spend, so a
+  subscription agent's usage is still visible in Analytics. `perMillion` can be
+  a map of model name → rate card (plus `default`) for agents that run more
+  than one model; it is applied per model from the CLI's `modelUsage`. Stored
+  history is re-priced on startup, so a config change applies retroactively.
+  The CLI's own estimate is kept on each result as `reported_cost_usd`.
 
 Each such agent gets its own workspace, session history, and settings, so an
 Anthropic-backed and a GLM-backed Claude Code can run side by side. Commented

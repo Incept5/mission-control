@@ -20,7 +20,12 @@
 //          tell Mission Control how this provider really bills:
 //            { plan: 'GLM Coding Plan', monthly: 18 }   flat fee → runs cost $0
 //            { perMillion: { input: 1, output: 3.2, cacheRead: 0.2 } }
-//          The CLI's figure is kept on each result as `reported_cost_usd`.
+//          Give both and runs still bill $0, but each result also carries
+//          `estimated_cost_usd` — the same tokens at list price — which the
+//          analytics page shows as "≈$ list". `perMillion` may be a map of
+//          model name → rate card (plus `default`) when the agent can run
+//          more than one model. The CLI's figure is kept on each result as
+//          `reported_cost_usd`.
 //
 // Claude Code still resolves its `sonnet`/`opus`/`haiku` aliases internally
 // (e.g. for sub-agents), so map them via ANTHROPIC_DEFAULT_*_MODEL too.
@@ -54,8 +59,19 @@ module.exports = {
         { value: 'glm-5.3-flash', label: 'GLM 5.3 Flash' },
       ],
       // Coding Plan tiers (z.ai/subscribe): Lite $18, Pro $72, Max $160 a month.
-      // Flat fee with a credit quota, so runs have no marginal cost.
-      pricing: { plan: 'GLM Coding Plan', monthly: 18 },
+      // Flat fee with a credit quota, so runs have no marginal cost. The rate
+      // cards are z.ai's pay-as-you-go list prices (docs.z.ai/guides/overview/pricing,
+      // checked 2026-09-03; Flash shown at its regular rate, not the promo)
+      // so analytics can show what each run would have cost on the API.
+      pricing: {
+        plan: 'GLM Coding Plan',
+        monthly: 18,
+        perMillion: {
+          'glm-5.3': { input: 1.4, output: 4.4, cacheRead: 0.26 },
+          'glm-5.3-flash': { input: 0.15, output: 0.5, cacheRead: 0.03 },
+          default: { input: 1.4, output: 4.4, cacheRead: 0.26 },
+        },
+      },
     },
 
     // More providers that work the same way — copy, fill in, restart.

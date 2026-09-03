@@ -11,6 +11,8 @@ const state = {
   wsFile: {},            // agentId -> { dir, selected, dirty }
   fileTree: {},          // agentId -> { expanded:Set, root, selected } (file trees)
   attach: {},            // agentId -> staged uploads / file references for the next message
+  drafts: {},            // agentId -> unsent composer text, survives agent switches
+  skillsCache: {},       // agentId -> { at, items } for the composer's `/` picker
   sessionSel: {},        // agentId -> selected session cid
   agentProj: {},         // agentId -> last seen project id (change detection)
   agentCid: {},          // agentId -> last seen conversation id
@@ -343,6 +345,7 @@ function renderHome() {
   const online = state.agents.filter((a) => a.status?.state !== 'offline').length;
   const working = state.agents.filter((a) => a.status?.state === 'working').length;
   const cost = state.agents.reduce((s, a) => s + (a.status?.totals?.cost || 0), 0);
+  const est = state.agents.reduce((s, a) => s + (a.status?.totals?.estimated ?? a.status?.totals?.cost ?? 0), 0);
 
   main.replaceChildren(
     el('div', { class: 'page' },
@@ -359,7 +362,7 @@ function renderHome() {
           }, String(cliOpenCount())),
           el('div', { class: 'stat-label' }, 'CLI tabs open'),
         ),
-        statTile('$' + cost.toFixed(3), 'Session spend'),
+        statTile(fmtCost(cost, est), 'Session spend'),
       ),
       el('div', { class: 'panel cli-live-panel' },
         el('h3', {}, 'Live CLI sessions'),
@@ -524,7 +527,7 @@ function agentCard(agent) {
       st.queue?.length ? el('span', { class: 'card-queue' }, `⧗ ${st.queue.length} queued`) : null,
       st.subagents?.length ? el('span', { class: 'card-queue' }, `⑂ ${st.subagents.length} subagent${st.subagents.length === 1 ? '' : 's'}`) : null,
       el('span', {}, `runs ${st.totals?.runs ?? 0}`),
-      el('span', {}, `$${(st.totals?.cost ?? 0).toFixed(3)}`),
+      el('span', {}, fmtCost(st.totals?.cost, st.totals?.estimated)),
       el('span', {}, `active ${fmtAgo(st.lastActivity)}`),
     ),
   );
@@ -647,6 +650,15 @@ function fmtTokens(n) {
   return (n / 1e6).toFixed(2) + 'M';
 }
 
+// Actual spend, plus what the same tokens would cost at list price when the
+// two differ (subscription-backed agents with a rate card configured).
+function fmtCost(cost, est, digits = 3) {
+  const actual = '$' + (cost || 0).toFixed(digits);
+  return typeof est === 'number' && Math.abs(est - (cost || 0)) > 1e-9
+    ? `${actual} (≈$${est.toFixed(digits)} list)`
+    : actual;
+}
+
 function fmtFeedTime(ts) {
   const d = new Date(ts);
   const today = new Date().toDateString() === d.toDateString();
@@ -675,22 +687,27 @@ async function renderAnalytics() {
   }
   const t = data.totals;
 
+  // Subscription-backed agents bill $0 per run, so bars and rankings use the
+  // list-price estimate (which equals actual spend for metered agents) and
+  // labels show both figures when they differ.
+  const hasEstimates = data.agents.some((a) => Math.abs(a.estimated - a.cost) > 1e-9);
+
   // Cost-by-day bars
-  const maxDay = Math.max(...data.days.map((d) => d.cost), 0.0001);
+  const maxDay = Math.max(...data.days.map((d) => d.estimated), 0.0001);
   const chart = el('div', { class: 'an-chart' },
     data.days.map((d) => {
-      const breakdown = Object.entries(d.byAgent).map(([n, c]) => `${n}: $${c.toFixed(3)}`).join('\n');
-      return el('div', { class: 'an-bar-col', title: `${d.date}\n$${d.cost.toFixed(3)} · ${d.runs} runs${breakdown ? '\n' + breakdown : ''}` },
-        el('div', { class: 'an-bar' + (d.cost ? '' : ' empty'), style: `height:${Math.max(2, (d.cost / maxDay) * 100)}%` }),
+      const breakdown = Object.entries(d.byAgent).map(([n, c]) => `${n}: ${fmtCost(c.cost, c.estimated)}`).join('\n');
+      return el('div', { class: 'an-bar-col', title: `${d.date}\n${fmtCost(d.cost, d.estimated)} · ${d.runs} runs${breakdown ? '\n' + breakdown : ''}` },
+        el('div', { class: 'an-bar' + (d.estimated ? '' : ' empty'), style: `height:${Math.max(2, (d.estimated / maxDay) * 100)}%` }),
         el('span', { class: 'an-bar-label' }, d.date.slice(8)),
       );
     })
   );
 
-  const agentsSorted = [...data.agents].sort((a, b) => b.cost - a.cost);
-  const projSorted = [...data.projects].sort((a, b) => b.cost - a.cost);
-  const maxAgentCost = Math.max(...agentsSorted.map((a) => a.cost), 0.0001);
-  const maxProjCost = Math.max(...projSorted.map((p) => p.cost), 0.0001);
+  const agentsSorted = [...data.agents].sort((a, b) => b.estimated - a.estimated);
+  const projSorted = [...data.projects].sort((a, b) => b.estimated - a.estimated);
+  const maxAgentCost = Math.max(...agentsSorted.map((a) => a.estimated), 0.0001);
+  const maxProjCost = Math.max(...projSorted.map((p) => p.estimated), 0.0001);
 
   const outcomesRows = data.agents.map((a) =>
     el('tr', {},
@@ -701,7 +718,7 @@ async function renderAnalytics() {
       el('td', {}, fmtDur(a.avgMs)),
       el('td', {}, fmtDur(a.maxMs)),
       el('td', {}, fmtTokens(a.tokensIn) + ' / ' + fmtTokens(a.tokensOut)),
-      el('td', {}, '$' + a.cost.toFixed(3)),
+      el('td', {}, fmtCost(a.cost, a.estimated)),
     ));
 
   const healthCards = data.projects.map((p) => {
@@ -714,7 +731,7 @@ async function renderAnalytics() {
           ? el('span', { class: 'proj-path' }, `⎇ ${p.git.branch || '?'}${p.git.dirty ? ` · ${p.git.dirty} uncommitted` : ' · clean'}`)
           : p.git?.notRepo ? el('span', { class: 'proj-path' }, 'no git repo') : null,
       ),
-      el('div', { class: 'kv' }, el('span', { class: 'k' }, 'Runs / cost'), el('span', { class: 'v' }, `${p.runs} · $${p.cost.toFixed(3)}`)),
+      el('div', { class: 'kv' }, el('span', { class: 'k' }, 'Runs / cost'), el('span', { class: 'v' }, `${p.runs} · ${fmtCost(p.cost, p.estimated)}`)),
       el('div', { class: 'kv' }, el('span', { class: 'k' }, 'Open cards'), el('span', { class: 'v' }, cardBits.length ? cardBits.join(', ') : 'none')),
       el('div', { class: 'kv' }, el('span', { class: 'k' }, 'Agents here'), el('span', { class: 'v' }, p.agents.length ? p.agents.join(', ') : '—')),
       el('div', { class: 'kv' }, el('span', { class: 'k' }, 'Last activity'), el('span', { class: 'v' }, fmtAgo(p.lastActivity))),
@@ -729,7 +746,7 @@ async function renderAnalytics() {
       const from = item.origin && item.origin.kind !== 'chat' ? ` from ${originLabel(item.origin)}` : '';
       text = `started${from}: ` + item.text;
     }
-    else if (item.kind === 'done') text = `finished${item.durationMs ? ' in ' + fmtDur(item.durationMs) : ''}${typeof item.cost === 'number' ? ' · $' + item.cost.toFixed(3) : ''}`;
+    else if (item.kind === 'done') text = `finished${item.durationMs ? ' in ' + fmtDur(item.durationMs) : ''}${typeof item.cost === 'number' ? ' · ' + fmtCost(item.cost, item.estimated) : ''}`;
     else if (item.kind === 'fail') text = 'run failed';
     else text = item.text || '';
     return el('div', { class: 'feed-item', onclick: () => { location.hash = '#/agent/' + encodeURIComponent(item.agentId); } },
@@ -747,8 +764,8 @@ async function renderAnalytics() {
       el('h1', { class: 'page-title' }, 'ANALYTICS'),
       el('p', { class: 'page-sub' }, 'Cost, outcomes, and activity across the fleet (from the retained event history).'),
       el('div', { class: 'stats' },
-        statTile('$' + t.todayCost.toFixed(2), 'Spend today'),
-        statTile('$' + t.weekCost.toFixed(2), 'Last 7 days'),
+        statTile('$' + t.todayCost.toFixed(2), 'Spend today' + (Math.abs(t.todayEstimated - t.todayCost) > 1e-9 ? ` · ≈$${t.todayEstimated.toFixed(2)} list` : '')),
+        statTile('$' + t.weekCost.toFixed(2), 'Last 7 days' + (Math.abs(t.weekEstimated - t.weekCost) > 1e-9 ? ` · ≈$${t.weekEstimated.toFixed(2)} list` : '')),
         statTile(t.runs, 'Runs'),
         statTile(t.successRate === null ? '—' : Math.round(t.successRate * 100) + '%', 'Success rate',
           t.successRate !== null && t.successRate < 0.9 ? 'var(--amber)' : null),
@@ -763,14 +780,17 @@ async function renderAnalytics() {
           })),
         el('div', { class: 'hint' }, `$${data.budget.todayCost.toFixed(2)} spent today (${Math.round((data.budget.todayCost / data.budget.threshold) * 100)}%)`),
       ) : null,
-      el('div', { class: 'panel' }, el('h3', {}, 'Cost by day — last 14 days'), chart),
+      el('div', { class: 'panel' },
+        el('h3', {}, 'Cost by day — last 14 days'),
+        hasEstimates ? el('div', { class: 'hint' }, 'Subscription agents bill $0 per run; "≈$ list" is what their tokens would cost at the provider\'s list price, and bars are sized by it.') : null,
+        chart),
       el('div', { class: 'control-grid', style: 'margin-top:16px' },
         el('div', { class: 'panel' },
           el('h3', {}, 'Cost by agent'),
-          agentsSorted.map((a) => hbar(a.name, a.cost, maxAgentCost, (v) => '$' + v.toFixed(3)))),
+          agentsSorted.map((a) => hbar(a.name, a.estimated, maxAgentCost, () => fmtCost(a.cost, a.estimated)))),
         el('div', { class: 'panel' },
           el('h3', {}, 'Cost by project'),
-          projSorted.map((p) => hbar(p.name, p.cost, maxProjCost, (v) => '$' + v.toFixed(3)))),
+          projSorted.map((p) => hbar(p.name, p.estimated, maxProjCost, () => fmtCost(p.cost, p.estimated)))),
         el('div', { class: 'panel span2' },
           el('h3', {}, 'Run outcomes'),
           el('div', { style: 'overflow-x:auto' },
@@ -1589,7 +1609,110 @@ function renderChat(agent, body) {
     placeholder: `Message ${agent.name}…  (Enter to send, Shift+Enter for newline, paste/drop files to attach)`,
     rows: '1',
   });
+  // Restore the unsent draft, like staged attachments above.
+  input.value = state.drafts[agent.id] || '';
+  // Slash-command picker: typing `/` at the start of the message lists the
+  // skills and commands available to this agent (project .claude/, the
+  // user's ~/.claude, and whatever the CLI reported last run), filtered as
+  // you type. Enter/Tab inserts the highlighted one; Esc dismisses.
+  const slashMenu = el('div', { class: 'slash-menu hidden' });
+  const slash = { items: null, shown: [], idx: 0, open: false, query: '' };
+
+  async function loadSkills() {
+    const cached = state.skillsCache[agent.id];
+    if (cached && Date.now() - cached.at < 30000) return cached.items;
+    let items = [];
+    try { items = await api(`/api/agents/${agent.id}/skills`); } catch {}
+    state.skillsCache[agent.id] = { at: Date.now(), items };
+    return items;
+  }
+
+  function slashToken() {
+    const before = input.value.slice(0, input.selectionStart);
+    const m = /^\/([\w:.-]*)$/.exec(before);
+    return m ? m[1] : null;
+  }
+
+  function closeSlash() {
+    slash.open = false;
+    slashMenu.classList.add('hidden');
+    slashMenu.replaceChildren();
+  }
+
+  function pickSlash(item) {
+    const rest = input.value.slice(input.selectionStart);
+    input.value = '/' + item.name + ' ' + rest.replace(/^\s+/, '');
+    const caret = item.name.length + 2;
+    input.setSelectionRange(caret, caret);
+    input.dispatchEvent(new Event('input'));
+    input.focus();
+  }
+
+  function renderSlash() {
+    slashMenu.replaceChildren();
+    if (!slash.shown.length) {
+      if (slash.query || (slash.items && slash.items.length)) return closeSlash();
+      slashMenu.append(el('div', { class: 'slash-empty' },
+        slash.items ? 'No skills found for this agent yet — send it one message and the CLI will report what it has.' : 'Loading skills…'));
+    }
+    slash.shown.forEach((item, i) => {
+      const row = el('div', {
+        class: 'slash-item' + (i === slash.idx ? ' active' : ''),
+        onmousedown: (e) => { e.preventDefault(); pickSlash(item); },
+        onmousemove: () => { if (slash.idx !== i) { slash.idx = i; renderSlash(); } },
+      },
+        el('span', { class: 'slash-name' }, '/' + item.name),
+        el('span', { class: 'slash-desc' }, item.description || ''),
+        el('span', { class: 'slash-src' }, item.source),
+      );
+      slashMenu.append(row);
+    });
+    slash.open = true;
+    slashMenu.classList.remove('hidden');
+    const active = slashMenu.querySelector('.slash-item.active');
+    if (active) active.scrollIntoView({ block: 'nearest' });
+  }
+
+  async function updateSlash() {
+    const q = slashToken();
+    if (q === null) return closeSlash();
+    const changed = q !== slash.query;
+    slash.query = q;
+    if (!slash.items) {
+      renderSlash();
+      slash.items = await loadSkills();
+      if (slashToken() === null) return closeSlash();
+    }
+    const needle = q.toLowerCase();
+    const starts = slash.items.filter((s) => s.name.toLowerCase().startsWith(needle));
+    const contains = slash.items.filter((s) => !starts.includes(s) &&
+      (s.name.toLowerCase().includes(needle) || (s.description || '').toLowerCase().includes(needle)));
+    slash.shown = [...starts, ...contains].slice(0, 12);
+    if (changed || slash.idx >= slash.shown.length) slash.idx = 0;
+    renderSlash();
+  }
+
+  function slashKey(e) {
+    if (!slash.open) return false;
+    if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
+      if (!slash.shown.length) return false;
+      const n = slash.shown.length;
+      slash.idx = (slash.idx + (e.key === 'ArrowDown' ? 1 : n - 1)) % n;
+      renderSlash();
+    } else if ((e.key === 'Enter' && !e.shiftKey) || e.key === 'Tab') {
+      if (!slash.shown.length) return false;
+      pickSlash(slash.shown[slash.idx]);
+    } else if (e.key === 'Escape') {
+      closeSlash();
+    } else {
+      return false;
+    }
+    e.preventDefault();
+    return true;
+  }
+
   input.addEventListener('keydown', (e) => {
+    if (slashKey(e)) return;
     if (e.key === 'Enter' && !e.shiftKey) {
       e.preventDefault();
       submit();
@@ -1598,7 +1721,11 @@ function renderChat(agent, body) {
   input.addEventListener('input', () => {
     input.style.height = 'auto';
     input.style.height = Math.min(input.scrollHeight, 160) + 'px';
+    state.drafts[agent.id] = input.value;
+    updateSlash();
   });
+  input.addEventListener('click', updateSlash);
+  input.addEventListener('blur', closeSlash);
   const sendBtn = el('button', { class: 'btn primary', onclick: submit }, 'Send');
 
   async function uploadFile(file) {
@@ -1699,6 +1826,7 @@ function renderChat(agent, body) {
       if (result.queued) toast(`Queued — position ${result.position}`);
       input.value = '';
       input.style.height = 'auto';
+      state.drafts[agent.id] = '';
       staged.length = 0;
       renderAttachChips(agent);
     } catch (err) {
@@ -1711,7 +1839,7 @@ function renderChat(agent, body) {
     workingSlot,
     el('div', { id: 'queue-slot' }),
     attachRow,
-    el('div', { class: 'composer' }, newSessionBtn, attachBtn, filesBtn, promptsBtn, input, sendBtn),
+    el('div', { class: 'composer' }, slashMenu, newSessionBtn, attachBtn, filesBtn, promptsBtn, input, sendBtn),
   );
   // Drop targets: a row dragged from a file tree becomes a reference chip;
   // anything else (files from the OS) is uploaded as an attachment.
@@ -1738,6 +1866,7 @@ function renderChat(agent, body) {
   });
   body.replaceChildren(filesOpen ? el('div', { class: 'chat-split' }, wrap, chatFilesPanel(agent, input, filesBtn)) : wrap);
   renderAttachChips(agent);
+  if (input.value) input.dispatchEvent(new Event('input'));   // re-grow restored draft
 
   // Chat shows the active session only; older sessions live in the Sessions tab.
   const cid = agent.status?.cid || null;
@@ -1983,9 +2112,10 @@ function renderEvent(ev) {
         return el('div', { class: 'meta-line error' }, `✗ run failed (${ev.subtype || 'error'})`);
       }
       const secs = ev.duration_ms ? (ev.duration_ms / 1000).toFixed(1) + 's' : '';
+      const est = typeof ev.estimated_cost_usd === 'number' ? ` · ≈$${ev.estimated_cost_usd.toFixed(4)} at list price` : '';
       const cost = ev.cost_basis === 'subscription'
-        ? (ev.plan ? `${ev.plan} (no marginal cost)` : 'included in plan')
-        : typeof ev.total_cost_usd === 'number' ? `${ev.total_cost_usd.toFixed(4)}` : '';
+        ? (ev.plan ? `${ev.plan} (no marginal cost)` : 'included in plan') + est
+        : typeof ev.total_cost_usd === 'number' ? `$${ev.total_cost_usd.toFixed(4)}` : '';
       return el('div', { class: 'meta-line' }, ['✓ done', secs, cost].filter(Boolean).join(' · '));
     }
 
@@ -2105,7 +2235,7 @@ function sessionToMarkdown(agent, s) {
     '',
     `- **When**: ${new Date(s.startedAt).toLocaleString()} → ${new Date(s.endedAt).toLocaleString()}`,
     `- **Project**: ${projName(s.pid)}`,
-    `- **Runs**: ${s.runs} · **Cost**: $${s.cost.toFixed(4)}${s.models.size ? ' · **Model**: ' + [...s.models].join(', ') : ''}`,
+    `- **Runs**: ${s.runs} · **Cost**: ${fmtCost(s.cost, s.estimated, 4)}${s.models.size ? ' · **Model**: ' + [...s.models].join(', ') : ''}`,
     '',
   ];
   for (const ev of s.events) {
@@ -2118,7 +2248,7 @@ function sessionToMarkdown(agent, s) {
         else if (block.type === 'tool_use') lines.push(`> ⚙ **${block.name}** ${toolInputSummary(block.input)}`, '');
       }
     } else if (ev.type === 'result') {
-      const cost = typeof ev.total_cost_usd === 'number' ? ` · $${ev.total_cost_usd.toFixed(4)}` : '';
+      const cost = typeof ev.total_cost_usd === 'number' ? ` · ${fmtCost(ev.total_cost_usd, ev.estimated_cost_usd, 4)}` : '';
       const dur = ev.duration_ms ? ` · ${(ev.duration_ms / 1000).toFixed(1)}s` : '';
       lines.push(`> ✓ run complete${dur}${cost}`, '');
     } else if (ev.type === 'error') {
@@ -2148,7 +2278,7 @@ function computeSessions(events) {
     const cid = ev.cid || 's-0';
     let s = map.get(cid);
     if (!s) {
-      s = { cid, pid: null, startedAt: ev.ts, endedAt: ev.ts, events: [], firstPrompt: null, prompts: 0, runs: 0, cost: 0, models: new Set() };
+      s = { cid, pid: null, startedAt: ev.ts, endedAt: ev.ts, events: [], firstPrompt: null, prompts: 0, runs: 0, cost: 0, estimated: 0, models: new Set() };
       map.set(cid, s);
     }
     if (ev.pid !== undefined && ev.pid !== null) s.pid = ev.pid;
@@ -2171,7 +2301,10 @@ function computeSessions(events) {
     }
     if (ev.type === 'result') {
       s.runs++;
-      if (typeof ev.total_cost_usd === 'number') s.cost += ev.total_cost_usd;
+      if (typeof ev.total_cost_usd === 'number') {
+        s.cost += ev.total_cost_usd;
+        s.estimated += ev.estimated_cost_usd ?? ev.total_cost_usd;
+      }
     }
     if (ev.type === 'system' && ev.subtype === 'init' && ev.model) s.models.add(ev.model);
   }
@@ -2217,7 +2350,7 @@ function renderSessions(agent, body) {
           s.origin ? originChip(s.origin, 'sm') : null,
           el('span', {}, new Date(s.startedAt).toLocaleString()),
           el('span', {}, `${s.prompts} msg`),
-          el('span', {}, '$' + s.cost.toFixed(3)),
+          el('span', {}, fmtCost(s.cost, s.estimated)),
         ),
       )
     );
@@ -2239,7 +2372,7 @@ function renderSessionDetail(agent, s, detail, isActive) {
       el('span', {}, `${new Date(s.startedAt).toLocaleString()} → ${new Date(s.endedAt).toLocaleTimeString()}`),
       el('span', {}, `${s.prompts} messages`),
       el('span', {}, `${s.runs} runs`),
-      el('span', {}, '$' + s.cost.toFixed(4)),
+      el('span', {}, fmtCost(s.cost, s.estimated, 4)),
       s.models.size ? el('span', {}, [...s.models].join(', ')) : null,
       s.filesTouched?.size
         ? el('span', { title: [...s.filesTouched].join('\n') }, `✎ ${s.filesTouched.size} file${s.filesTouched.size === 1 ? '' : 's'}`)
@@ -2778,7 +2911,7 @@ function refreshControlInfo(agent) {
     kv('Model', modelLabel(st)),
     kv('Session ID', st.sessionId ? st.sessionId.slice(0, 18) + '…' : 'none (fresh)'),
     kv('Runs', String(st.totals?.runs ?? 0)),
-    kv('Session cost', '$' + (st.totals?.cost ?? 0).toFixed(4)),
+    kv('Session cost', fmtCost(st.totals?.cost, st.totals?.estimated, 4)),
     kv('Last activity', fmtAgo(st.lastActivity)),
   );
 }

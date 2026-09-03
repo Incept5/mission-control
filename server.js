@@ -242,6 +242,10 @@ app.get('/api/agents/:id/history', wrap((req, res) => {
   res.json(manager.get(req.params.id).history);
 }));
 
+app.get('/api/agents/:id/skills', wrap((req, res) => {
+  res.json(manager.listSkills(req.params.id));
+}));
+
 app.post('/api/agents/:id/chat', wrap((req, res) => {
   res.json(manager.sendChat(req.params.id, String(req.body.message || '').trim()));
 }));
