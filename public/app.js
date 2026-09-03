@@ -157,13 +157,13 @@ function handleServerMsg(msg) {
     renderSidebar();
     const cur = currentAgentId();
     if (cur && !getAgent(cur)) { location.hash = '#/'; return; }
-    if (!cur && !onProjectsPage()) renderHome();
+    if (!cur && !onOtherPage()) renderHome();
     return;
   }
   if (msg.type === 'projects') {
     state.projects = msg.projects;
     if (onProjectsPage()) renderProjects();
-    else if (!currentAgentId()) renderHome();
+    else if (!currentAgentId()) { if (!onOtherPage()) renderHome(); }
     else {
       const agent = getAgent(currentAgentId());
       if (agent) populateProjectSelect(agent);
@@ -223,6 +223,13 @@ function onAlertsPage() {
 
 function onAnalyticsPage() {
   return location.hash.startsWith('#/analytics');
+}
+
+// True on any route that isn't the agent view or the home dashboard, so
+// background broadcasts (agent/project list updates) don't yank the user
+// back to the dashboard while they're looking at one of these pages.
+function onOtherPage() {
+  return onProjectsPage() || onBoardPage() || onAlertsPage() || onAnalyticsPage() || !!currentProjectHistoryId();
 }
 
 async function route() {
@@ -1821,15 +1828,27 @@ function renderChat(agent, body) {
         'Files and folders for context (read files with your Read tool; list a folder before reading inside it):\n' +
         staged.map((a) => '- ' + a.path + (a.type === 'dir' ? '/' : '')).join('\n');
     }
+    // Clear before the request, not after: a status broadcast can re-render
+    // the chat while the POST is in flight (new cid when the run starts), and
+    // clearing then would hit the replaced textarea — leaving the sent text
+    // sitting in the box. The draft comes back if the send fails.
+    const draft = input.value;
+    input.value = '';
+    input.style.height = 'auto';
+    state.drafts[agent.id] = '';
     try {
       const result = await api(`/api/agents/${agent.id}/chat`, { method: 'POST', body: { message: text } });
       if (result.queued) toast(`Queued — position ${result.position}`);
-      input.value = '';
-      input.style.height = 'auto';
-      state.drafts[agent.id] = '';
       staged.length = 0;
       renderAttachChips(agent);
     } catch (err) {
+      if (input.isConnected && !input.value) {
+        input.value = draft;
+        input.dispatchEvent(new Event('input'));   // re-grow + re-save draft
+        input.focus();
+      } else if (!input.isConnected) {
+        state.drafts[agent.id] = draft;   // chat re-rendered mid-flight; draft returns on the next render
+      }
       toast(err.message, true);
     }
   }
