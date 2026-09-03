@@ -193,13 +193,29 @@ mission control, and how its own work fits the whole.
   the Codex `-c`, Gemini `--mcp-config`, and OpenCode `--config` equivalents
   follow their docs and remain stub-verified until those CLIs are installed.
 
-### M13 — Auto-maintained catalog + `_mc/`
+### M13 — Auto-maintained catalog + `_mc/`  ✅ shipped 2026-09-03
 - MC writes and refreshes `_catalog/<slug>.md` per registered project — on
   registration, on harness changes (M9's harness summary once it ships;
   name / path / agents until then), and on run events for the last-activity
   stamp. Unregister sets `status: retired`.
 - MC distills its own planning interviews and operating decisions into
   `_mc/` notes (the scope M11 had claimed for `data/memory/`).
+- Shipped notes: `Vault#refreshCatalog` regenerates a page from live manager
+  data (name / path / summary / agents / registered / last-activity /
+  status); refreshes are surgical — frontmatter keys MC doesn't own
+  (`stack`, `needs-review`, agent-added fields) and any dated-append
+  sections survive, and a refresh that changes nothing skips the write.
+  Hooks: registration, project edits, agent reassignment (both pages), every
+  finished run (day-granular stamp → at most one write per project per day),
+  unregister (`retireCatalog`, page kept), and a boot reconciliation that
+  refreshes every page, retires orphans, and re-distills `_mc/`.
+  `lib/mc-notes.js` distills ROADMAP.md — one `decision` note per planning
+  round (round 1 is the document preamble, dated by its interview line),
+  wrapped decision lines folded in — hash-guarded so hand edits survive
+  until their round's decisions change. Verified against a scratch vault
+  (23 assertions: create/update/idempotence/foreign-key and append
+  survival/retire/re-distill) and a live boot (4 catalog refreshes + 3
+  `_mc/` notes auto-committed; a second boot writes nothing).
 
 ### M14 — Vault page in the dashboard
 - File tree over the vault, note viewer/editor, search, and the write

@@ -184,6 +184,14 @@ decisions. Notes carry frontmatter — `type` (project-note | convention |
 decision | gotcha | how-to), `project` (optional), `tags`, `author`,
 `updated` — and sit flat in `notes/`.
 
+MC maintains its own folders: catalog pages are written on registration and
+refreshed on project edits, agent assignment, and every finished run (a
+day-granular last-activity stamp); unregistering marks a page `retired`
+rather than deleting it. `_mc/` holds one note per planning round, distilled
+from `ROADMAP.md` on boot. Refreshes never clobber agent additions — foreign
+frontmatter keys and appended sections survive, and unchanged content skips
+the write entirely.
+
 At spawn each run gets two things:
 
 - a short **preamble** (fleet catalog, its own project's page, and the three
@@ -305,6 +313,7 @@ lib/agent-manager.js Wires adapters to history + broadcasts
 lib/adapters/        One adapter per agent type
 lib/vault.js         Fleet vault core (settings, init, read/write, preamble)
 lib/vault-mcp.js     Stdio MCP server agents get at spawn
+lib/mc-notes.js      Distills ROADMAP.md planning rounds into `_mc/` vault notes
 public/              The dashboard UI (vanilla JS, no build step)
 workspaces/          One working directory per agent
 data/                Chat history + settings (gitignore-able)
