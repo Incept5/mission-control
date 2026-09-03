@@ -17,6 +17,7 @@ const state = {
   agentProj: {},         // agentId -> last seen project id (change detection)
   agentCid: {},          // agentId -> last seen conversation id
   projEdit: null,        // project id currently being edited on Projects page
+  vault: null,           // Vault page: { sel, editing, draft, q, flaggedOnly, expanded:Set }
   cliSessions: [],       // live external CLI sessions (from /api/cli-sessions)
   cliFetchedAt: 0,
   connected: false,
@@ -217,6 +218,10 @@ function onBoardPage() {
   return location.hash.startsWith('#/board');
 }
 
+function onVaultPage() {
+  return location.hash.startsWith('#/vault');
+}
+
 function onAlertsPage() {
   return location.hash.startsWith('#/alerts');
 }
@@ -229,7 +234,7 @@ function onAnalyticsPage() {
 // background broadcasts (agent/project list updates) don't yank the user
 // back to the dashboard while they're looking at one of these pages.
 function onOtherPage() {
-  return onProjectsPage() || onBoardPage() || onAlertsPage() || onAnalyticsPage() || !!currentProjectHistoryId();
+  return onProjectsPage() || onBoardPage() || onAlertsPage() || onAnalyticsPage() || onVaultPage() || !!currentProjectHistoryId();
 }
 
 async function route() {
@@ -240,6 +245,7 @@ async function route() {
   if (onBoardPage()) return renderBoard();
   if (onAlertsPage()) return renderAlerts();
   if (onAnalyticsPage()) return renderAnalytics();
+  if (onVaultPage()) return renderVault();
   if (!id) return renderHome();
   const agent = getAgent(id);
   if (!agent) return renderHome();
@@ -256,11 +262,12 @@ window.addEventListener('hashchange', route);
 
 function renderSidebar() {
   const id = currentAgentId();
-  $('.nav-item[data-route="home"]').classList.toggle('active', !id && !onProjectsPage() && !onBoardPage() && !onAlertsPage() && !onAnalyticsPage());
+  $('.nav-item[data-route="home"]').classList.toggle('active', !id && !onProjectsPage() && !onBoardPage() && !onAlertsPage() && !onAnalyticsPage() && !onVaultPage());
   $('.nav-item[data-route="projects"]').classList.toggle('active', onProjectsPage() || !!currentProjectHistoryId());
   $('.nav-item[data-route="board"]').classList.toggle('active', onBoardPage());
   $('.nav-item[data-route="alerts"]').classList.toggle('active', onAlertsPage());
   $('.nav-item[data-route="analytics"]').classList.toggle('active', onAnalyticsPage());
+  $('.nav-item[data-route="vault"]').classList.toggle('active', onVaultPage());
   const nav = $('#agent-nav');
   nav.replaceChildren(
     ...state.agents.map((a) =>
@@ -965,6 +972,524 @@ async function renderAlerts() {
     )
   );
 }
+
+/* ── Vault page (M14) ────────────────────────────────────────────── */
+
+// The Vault page browses the shared fleet vault: a file tree with
+// needs-review flags, a note viewer/editor, full-text search, and the write
+// activity feed (the vault's git log) with one-click revert of a single
+// write. Writes also arrive from MCP servers in other processes, so the tree
+// and feed are polled while the page is visible — nothing pushes to us.
+
+function vaultState() {
+  return (state.vault ||= {
+    sel: null,          // open note path (null = nothing open)
+    isNew: false,       // editor holds a not-yet-created note
+    draft: '',          // editor content, kept across re-renders while open
+    q: '',              // search query — '' shows the plain tree
+    flaggedOnly: false, // tree filtered to needs-review notes
+    expanded: new Set(['_catalog', '_mc', 'notes']),
+  });
+}
+
+async function renderVault() {
+  let status = null;
+  let statusErr = null;
+  try { status = await api('/api/vault'); } catch (err) { statusErr = err; }
+  if (!status || !status.enabled) return renderVaultDisabled(status, statusErr);
+  if (!status.ready) {
+    main.replaceChildren(el('div', { class: 'page' },
+      el('h1', { class: 'page-title' }, 'VAULT'),
+      el('p', { class: 'page-sub' }, `Vault is initializing at ${status.path || '…'} — hang on, this page catches it automatically.`),
+      el('div', { class: 'panel', id: 'vault-retry' }, el('span', { class: 'hint' }, 'initializing…')),
+    ));
+    return;
+  }
+
+  const v = vaultState();
+  const searchIn = el('input', {
+    type: 'search', placeholder: 'Search the vault…', value: v.q,
+    style: 'width:100%',
+  });
+  let searchTimer = null;
+  searchIn.addEventListener('input', () => {
+    clearTimeout(searchTimer);
+    searchTimer = setTimeout(() => { v.q = searchIn.value.trim(); refreshVaultTree(); }, 250);
+  });
+  searchIn.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape') { searchIn.value = ''; v.q = ''; refreshVaultTree(); }
+  });
+
+  const treeList = el('div', { class: 'vault-tree-list', id: 'vault-tree-list' });
+  const notePane = el('div', { class: 'panel vault-note', id: 'vault-note-pane' });
+  const feedList = el('div', { class: 'vault-feed-list', id: 'vault-feed-list' });
+
+  const flagBtn = el('button', {
+    class: 'btn sm' + (v.flaggedOnly ? ' primary' : ''),
+    title: 'Show only notes flagged needs-review',
+    onclick: () => { v.flaggedOnly = !v.flaggedOnly; renderVault(); },
+  }, '⚑ Needs review');
+
+  main.replaceChildren(
+    el('div', { class: 'page vault-page' },
+      el('div', { class: 'vault-head' },
+        el('h1', { class: 'page-title', style: 'margin:0' }, 'VAULT'),
+        el('span', { class: 'vault-path', title: status.path }, status.path),
+        status.stats ? el('span', { class: 'vault-stats' },
+          `${status.stats.notes} notes · ${status.stats.catalog} catalog · ${status.stats.mc} mc`) : null,
+        el('span', { class: 'flex-spacer' }),
+        flagBtn,
+        el('button', { class: 'btn sm', title: 'Refresh', onclick: () => { refreshVaultTree(); refreshVaultFeed(); } }, '↻'),
+      ),
+      el('div', { class: 'vault-body' },
+        el('div', { class: 'panel vault-tree' },
+          el('div', { class: 'vault-tree-head' }, searchIn),
+          treeList,
+          el('div', { class: 'vault-tree-foot' },
+            el('button', {
+              class: 'btn sm', title: 'New note (bare names land in notes/)',
+              onclick: newVaultNote,
+            }, '+ New note')),
+        ),
+        notePane,
+        el('div', { class: 'panel vault-feed' },
+          el('h3', { style: 'margin:0 0 4px' }, 'Write activity'),
+          el('div', { class: 'hint', style: 'margin-bottom:6px' }, 'Every vault write, newest first — ▤ the diff, ↩ to revert one.'),
+          feedList,
+        ),
+      ),
+    )
+  );
+
+  await Promise.all([refreshVaultTree(), refreshVaultFeed()]);
+  if (v.sel && !v.isNew) openVaultNote(v.sel);
+  else if (v.isNew) renderVaultEditor(v.sel, v.draft, true);
+  else showVaultNoteEmpty();
+}
+
+function renderVaultDisabled(status, statusErr) {
+  main.replaceChildren(el('div', { class: 'page' },
+    el('h1', { class: 'page-title' }, 'VAULT'),
+    el('p', { class: 'page-sub' },
+      statusErr
+        ? `Could not reach the vault status endpoint: ${statusErr.message}`
+        : 'The shared fleet vault is disabled. Agents spawn without vault context and nothing reads or writes it.'),
+    el('div', { class: 'panel', id: 'vault-retry' },
+      el('h3', {}, statusErr ? 'Vault unreachable' : 'Vault disabled'),
+      el('p', { class: 'hint' },
+        `Path: ${status?.path || '(default: a fleet-vault folder next to mission control)'} — configure via data/settings.json \`_vault\` or PUT /api/vault.`),
+      statusErr ? null : el('div', { class: 'btn-row' },
+        el('button', {
+          class: 'btn primary',
+          onclick: async () => {
+            try {
+              await api('/api/vault', { method: 'PUT', body: { enabled: true } });
+              toast('Vault enabled');
+              renderVault();
+            } catch (err) { toast(err.message, true); }
+          },
+        }, 'Enable vault'),
+      ),
+    ),
+  ));
+}
+
+/* ── Tree + search ───────────────────────────────────────────────── */
+
+async function refreshVaultTree() {
+  const box = $('#vault-tree-list');
+  if (!box) return;
+  const v = vaultState();
+  if (v.q) return refreshVaultSearch(box, v);
+  let entries;
+  try {
+    entries = await api('/api/vault/notes');
+  } catch (err) {
+    box.replaceChildren(el('div', { class: 'vault-tree-empty' }, err.message));
+    return;
+  }
+  if (v.flaggedOnly) entries = entries.filter((e) => e.needsReview);
+
+  // Group the flat index into nested folder rows. The vault is flat by
+  // design (notes/, _catalog/, _mc/), but nesting costs nothing.
+  const root = { dirs: new Map(), files: [] };
+  for (const e of entries) {
+    const segs = e.path.split('/');
+    let node = root;
+    for (let i = 0; i < segs.length - 1; i++) {
+      if (!node.dirs.has(segs[i])) node.dirs.set(segs[i], { name: segs[i], dirs: new Map(), files: [] });
+      node = node.dirs.get(segs[i]);
+    }
+    node.files.push(e);
+  }
+
+  box.replaceChildren(...vaultTreeNodes(root, 0));
+  if (!entries.length) {
+    box.append(el('div', { class: 'vault-tree-empty' },
+      v.flaggedOnly ? 'No notes flagged needs-review' : 'The vault is empty'));
+  }
+  markVaultTreeSelection();
+}
+
+function vaultTreeNodes(node, depth) {
+  const v = vaultState();
+  const rows = [];
+  for (const dir of [...node.dirs.values()].sort((a, b) => a.name.localeCompare(b.name))) {
+    const all = [...dir.dirs.keys(), ...dir.files.map((f) => f.path)];
+    const flagged = dir.files.filter((f) => f.needsReview).length;
+    const open = v.expanded.has(dir.name);
+    const children = el('div', { class: 'ftree-children', style: open ? '' : 'display:none' },
+      open ? vaultTreeNodes(dir, depth + 1) : null);
+    const caret = el('span', { class: 'ftree-caret' }, open ? '▾' : '▸');
+    const row = el('div', {
+      class: 'ftree-row dir', 'data-dir': dir.name,
+      style: `padding-left:${8 + depth * 14}px`,
+    },
+      caret,
+      el('span', { class: 'ftree-icon' }, '📁'),
+      el('span', { class: 'name' }, dir.name + '/'),
+      flagged ? el('span', { class: 'flag-badge', title: `${flagged} needs review` }, `⚑ ${flagged}`) : null,
+      el('span', { class: 'size' }, String(all.length)),
+    );
+    row.addEventListener('click', () => {
+      const nowOpen = !v.expanded.has(dir.name);
+      if (nowOpen) v.expanded.add(dir.name); else v.expanded.delete(dir.name);
+      caret.textContent = nowOpen ? '▾' : '▸';
+      children.style.display = nowOpen ? '' : 'none';
+      if (nowOpen && !children.childElementCount) children.append(...vaultTreeNodes(dir, depth + 1));
+    });
+    rows.push(el('div', { class: 'ftree-node' }, row, children));
+  }
+  const files = node.files.sort((a, b) => a.path.localeCompare(b.path));
+  for (const f of files) {
+    rows.push(el('div', {
+      class: 'ftree-row' + (f.needsReview ? ' flagged' : '') + (f.path === v.sel ? ' selected' : ''),
+      'data-path': f.path, title: f.path,
+      style: `padding-left:${28 + depth * 14}px`,
+      onclick: () => openVaultNote(f.path),
+    },
+      el('span', { class: 'ftree-icon' }, '📄'),
+      el('span', { class: 'name' }, f.title),
+      f.needsReview ? el('span', { class: 'flag-badge', title: 'needs review' }, '⚑') : null,
+      f.updated ? el('span', { class: 'size' }, String(f.updated).slice(5)) : null,
+    ));
+  }
+  return rows;
+}
+
+async function refreshVaultSearch(box, v) {
+  let hits;
+  try {
+    hits = await api(`/api/vault/search?query=${encodeURIComponent(v.q)}&limit=30`);
+  } catch (err) {
+    box.replaceChildren(el('div', { class: 'vault-tree-empty' }, err.message));
+    return;
+  }
+  box.replaceChildren(
+    el('div', { class: 'vault-tree-empty' }, `${hits.length} match${hits.length === 1 ? '' : 'es'}`),
+    ...hits.map((h) => el('div', {
+      class: 'ftree-row vault-hit' + (h.path === v.sel ? ' selected' : ''),
+      'data-path': h.path, title: h.path,
+      onclick: () => openVaultNote(h.path),
+    },
+      el('span', { class: 'ftree-icon' }, h.needsReview ? '⚑' : '📄'),
+      el('span', { class: 'vault-hit-text' },
+        el('div', { class: 'vault-hit-title' }, h.title),
+        el('div', { class: 'vault-hit-path' }, h.path),
+        h.snippet ? el('div', { class: 'vault-hit-snip' }, '…' + h.snippet + '…') : null,
+      ),
+    )),
+  );
+  markVaultTreeSelection();
+}
+
+function markVaultTreeSelection() {
+  const v = vaultState();
+  for (const r of document.querySelectorAll('#vault-tree-list .ftree-row[data-path]')) {
+    r.classList.toggle('selected', r.dataset.path === v.sel);
+  }
+}
+
+/* ── Note viewer / editor ────────────────────────────────────────── */
+
+function showVaultNoteEmpty() {
+  const pane = $('#vault-note-pane');
+  if (pane) pane.replaceChildren(el('div', { class: 'ws-empty' }, 'Select a note to view or edit'));
+}
+
+async function openVaultNote(rel) {
+  const v = vaultState();
+  v.sel = rel;
+  v.isNew = false;
+  markVaultTreeSelection();
+  let note;
+  try {
+    note = await api(`/api/vault/note?path=${encodeURIComponent(rel)}`);
+  } catch (err) {
+    toast(err.message, true);
+    showVaultNoteEmpty();
+    return;
+  }
+  if (v.sel !== rel || !$('#vault-note-pane')) return; // user moved on mid-fetch
+  renderVaultNote(note);
+}
+
+function renderVaultNote(note) {
+  const pane = $('#vault-note-pane');
+  if (!pane) return;
+  const fm = note.fm || {};
+  const flagged = fm['needs-review'] === true;
+  const chips = [
+    fm.type ? el('span', { class: 'fm-chip type' }, fm.type) : null,
+    fm.project ? el('span', { class: 'fm-chip' }, '▣ ' + fm.project) : null,
+    Array.isArray(fm.tags) && fm.tags.length ? el('span', { class: 'fm-chip' }, '# ' + fm.tags.join(' #')) : null,
+    fm.author ? el('span', { class: 'fm-chip' }, '✎ ' + fm.author) : null,
+    fm.updated ? el('span', { class: 'fm-chip' }, '⏱ ' + fm.updated) : null,
+    flagged ? el('span', { class: 'fm-chip warn', title: 'Flagged needs-review' }, '⚑ needs review') : null,
+  ];
+  pane.replaceChildren(
+    el('div', { class: 'vault-note-head' },
+      el('span', { class: 'vault-note-path', title: note.path }, note.path),
+      el('span', { class: 'flex-spacer' }),
+      el('button', {
+        class: 'btn sm' + (flagged ? ' primary' : ''),
+        title: flagged ? 'Clear the needs-review flag' : 'Flag this note as stale / needs review',
+        onclick: () => flagVaultNote(note, !flagged),
+      }, flagged ? '✓ Clear flag' : '⚑ Flag'),
+      el('button', {
+        class: 'btn sm primary',
+        onclick: () => {
+          const v = vaultState();
+          v.isNew = false;
+          v.draft = note.text;
+          renderVaultEditor(note.path, note.text, false);
+        },
+      }, '✎ Edit'),
+    ),
+    el('div', { class: 'fm-chips' }, chips),
+    (() => {
+      const md = el('div', { class: 'md' });
+      md.innerHTML = renderNoteMarkdown(note.body); // el() children are text nodes; html goes through innerHTML
+      return el('div', { class: 'vault-note-body' }, md);
+    })(),
+  );
+}
+
+// The editor works on the raw text, frontmatter included — write() parses and
+// re-validates it server-side, exactly like an agent's vault_write.
+function renderVaultEditor(rel, text, isNew) {
+  const pane = $('#vault-note-pane');
+  if (!pane) return;
+  const v = vaultState();
+  const ta = el('textarea', { spellcheck: 'false', class: 'vault-editor' });
+  ta.value = text;
+  // Keep the typed text in state so a re-render (flag toggle, poll of the
+  // other panes, route away and back) restores exactly what was on screen.
+  ta.addEventListener('input', () => { v.draft = ta.value; });
+  pane.replaceChildren(
+    el('div', { class: 'vault-note-head' },
+      el('span', { class: 'vault-note-path', title: rel }, rel),
+      el('span', { class: 'flex-spacer' }),
+      el('button', {
+        class: 'btn sm primary',
+        onclick: async () => {
+          try {
+            const r = await api('/api/vault/note', { method: 'PUT', body: { path: rel, content: ta.value } });
+            toast(`${r.created ? 'Created' : 'Saved'} ${r.path}${r.commit ? ` (${r.commit})` : ''}`);
+            v.isNew = false;
+            v.sel = r.path;
+            await Promise.all([refreshVaultTree(), refreshVaultFeed()]);
+            openVaultNote(r.path);
+          } catch (err) { toast(err.message, true); }
+        },
+      }, 'Save'),
+      el('button', {
+        class: 'btn sm',
+        onclick: () => {
+          v.isNew = false;
+          if (v.sel && v.sel !== rel) openVaultNote(v.sel);
+          else if (isNew) { v.sel = null; showVaultNoteEmpty(); refreshVaultTree(); }
+          else openVaultNote(rel);
+        },
+      }, 'Cancel'),
+    ),
+    isNew ? el('div', { class: 'hint', style: 'padding:0 14px 8px' },
+      'notes/ require a type: project-note | convention | decision | gotcha | how-to') : null,
+    ta,
+  );
+  ta.focus();
+}
+
+async function newVaultNote() {
+  const rel = prompt('New note path (bare names land in notes/):', 'notes/new-note.md');
+  if (!rel) return;
+  const v = vaultState();
+  v.sel = rel;
+  v.isNew = true;
+  v.draft = [
+    '---',
+    'type: how-to',
+    'tags: []',
+    '---',
+    '',
+    '# ' + rel.split('/').pop().replace(/\.md$/, '').replace(/[-_]+/g, ' '),
+    '',
+    '',
+  ].join('\n');
+  markVaultTreeSelection();
+  renderVaultEditor(rel, v.draft, true);
+}
+
+async function flagVaultNote(note, flag) {
+  try {
+    await api('/api/vault/note', { method: 'PUT', body: { path: note.path, content: note.text, needsReview: flag } });
+    toast(flag ? `Flagged ${note.path}` : `Cleared flag on ${note.path}`);
+    await refreshVaultTree();
+    openVaultNote(note.path);
+  } catch (err) { toast(err.message, true); }
+}
+
+// Slightly fuller renderer than the chat one: vault notes carry headings,
+// lists, links, and fences. Input is escaped before any transform.
+function renderNoteMarkdown(text) {
+  const inline = (s) => s
+    .replace(/`([^`]+)`/g, '<code>$1</code>')
+    .replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>')
+    .replace(/\[([^\]]+)\]\(([^)\s]+)\)/g, '<a href="$2" target="_blank" rel="noopener">$1</a>');
+  const blocks = (chunk) => {
+    const out = [];
+    let list = null;
+    let para = [];
+    const flushPara = () => { if (para.length) { out.push(`<p>${para.join('<br>')}</p>`); para = []; } };
+    const flushList = () => { if (list) { out.push(`</${list}>`); list = null; } };
+    for (const raw of escapeHtml(chunk).split('\n')) {
+      const line = raw.trimEnd();
+      if (!line.trim()) { flushPara(); flushList(); continue; }
+      const h = line.match(/^(#{1,4})\s+(.*)$/);
+      if (h) { flushPara(); flushList(); out.push(`<${h[1].length <= 2 ? 'h3' : 'h4'}>${inline(h[2])}</${h[1].length <= 2 ? 'h3' : 'h4'}>`); continue; }
+      if (/^\s*(-{3,}|\*{3,}|_{3,})\s*$/.test(line)) { flushPara(); flushList(); out.push('<hr>'); continue; }
+      const ul = line.match(/^\s*[-*]\s+(.*)$/);
+      const ol = line.match(/^\s*\d+[.)]\s+(.*)$/);
+      if (ul || ol) {
+        flushPara();
+        const want = ul ? 'ul' : 'ol';
+        if (list !== want) { flushList(); out.push(`<${want}>`); list = want; }
+        out.push(`<li>${inline((ul || ol)[1])}</li>`);
+        continue;
+      }
+      flushList();
+      para.push(inline(line));
+    }
+    flushPara();
+    flushList();
+    return out.join('');
+  };
+  const parts = String(text || '').split(/```(\w*)\n?([\s\S]*?)```/g);
+  let html = '';
+  for (let i = 0; i < parts.length; i += 3) {
+    html += blocks(parts[i] || '');
+    if (i + 2 < parts.length) html += `<pre><code>${escapeHtml(parts[i + 2] || '')}</code></pre>`;
+  }
+  return html;
+}
+
+/* ── Write activity feed ─────────────────────────────────────────── */
+
+const VAULT_ACTIONS = {
+  create: 'created', update: 'updated', append: 'appended to',
+  initialize: 'initialized', other: 'changed',
+};
+
+async function refreshVaultFeed() {
+  const list = $('#vault-feed-list');
+  if (!list) return;
+  let items;
+  try {
+    items = await api('/api/vault/feed?limit=50');
+  } catch (err) {
+    list.replaceChildren(el('div', { class: 'vault-tree-empty' }, err.message));
+    return;
+  }
+  list.replaceChildren(...items.map(vaultFeedRow));
+  if (!items.length) list.append(el('div', { class: 'vault-tree-empty' }, 'No writes yet'));
+}
+
+function vaultFeedRow(it) {
+  const verb = VAULT_ACTIONS[it.action] || 'changed';
+  const pathBits = it.path ? it.path.split('/') : [];
+  const fileName = pathBits.pop();
+  const actions = [
+    el('button', {
+      class: 'btn sm', title: `Show the diff for ${it.hash}`,
+      onclick: () => showVaultCommit(it.hash),
+    }, '▤'),
+  ];
+  if (it.path) {
+    actions.push(el('button', {
+      class: 'btn sm danger', title: 'Revert this single write (a new commit; history keeps both)',
+      onclick: () => revertVaultWrite(it),
+    }, '↩'));
+  }
+  return el('div', { class: 'vault-feed-item' + (it.reserved ? ' reserved' : '') },
+    el('div', { class: 'vault-feed-top' },
+      el('span', { class: 'feed-time', title: it.subject }, fmtFeedTime(it.ts || Date.now())),
+      el('span', { class: 'vault-feed-author', title: it.email || '' }, it.author || '?'),
+      it.reserved ? el('span', { class: 'flag-badge', title: 'write into a reserved MC folder' }, '⚑ reserved') : null,
+      el('span', { class: 'flex-spacer' }),
+      ...actions,
+    ),
+    el('div', {
+      class: 'vault-feed-what' + (it.path ? ' linkish' : ''),
+      title: it.path || it.subject,
+      onclick: () => it.path && openVaultNote(it.path),
+    },
+      it.revert ? el('span', { class: 'vault-feed-revert' }, '↩ reverted — ') : null,
+      el('span', {}, `${verb} `),
+      pathBits.length ? el('span', { class: 'vault-feed-dir' }, pathBits.join('/') + '/') : null,
+      el('span', { class: 'vault-feed-file' }, fileName || it.subject),
+    ),
+  );
+}
+
+async function revertVaultWrite(it) {
+  const what = it.path || it.hash;
+  if (!confirm(`Revert this write?\n${what}\n\nA new commit restores the previous content — history keeps both.`)) return;
+  try {
+    const r = await api('/api/vault/revert', { method: 'POST', body: { hash: it.hash } });
+    toast(`Reverted ${what}${r.commit ? ` (${r.commit})` : ''}`);
+    await Promise.all([refreshVaultTree(), refreshVaultFeed()]);
+    const v = vaultState();
+    if (v.sel && !v.isNew) openVaultNote(v.sel);
+  } catch (err) { toast(err.message, true); }
+}
+
+async function showVaultCommit(hash) {
+  let data;
+  try {
+    data = await api(`/api/vault/commit?hash=${encodeURIComponent(hash)}`);
+  } catch (err) {
+    toast(err.message, true);
+    return;
+  }
+  const overlay = el('div', { class: 'modal-overlay' });
+  const close = () => { overlay.remove(); document.removeEventListener('keydown', onKey); };
+  const onKey = (e) => { if (e.key === 'Escape') close(); };
+  document.addEventListener('keydown', onKey);
+  overlay.append(
+    el('div', { class: 'modal vault-diff' },
+      el('div', { class: 'modal-head' },
+        el('strong', {}, `Vault write ${hash}`),
+        data.truncated ? el('span', { class: 'hint' }, 'diff truncated') : null,
+        el('button', { class: 'btn sm modal-close', onclick: close }, '✕'),
+      ),
+      el('div', { class: 'modal-body vault-diff-body' }, renderDiffText(data.text)),
+    ),
+  );
+  overlay.addEventListener('click', (e) => { if (e.target === overlay) close(); });
+  document.body.append(overlay);
+}
+
+
 
 /* ── Kanban board ────────────────────────────────────────────────── */
 
@@ -2963,6 +3488,15 @@ setInterval(() => {
 setInterval(() => {
   if ($('#cli-live-list')) refreshCliSessions();
 }, 15000);
+
+// Keep the Vault page fresh while it's visible — writes also arrive from MCP
+// servers in other agent processes, so nothing pushes updates to us. The
+// editor pane is deliberately left alone. A not-yet-ready vault re-renders
+// the whole page so it picks up the moment initialization finishes.
+setInterval(() => {
+  if ($('#vault-feed-list')) { refreshVaultTree(); refreshVaultFeed(); }
+  else if ($('#vault-retry')) renderVault();
+}, 20000);
 
 (async function boot() {
   try {

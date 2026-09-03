@@ -217,9 +217,67 @@ mission control, and how its own work fits the whole.
   survival/retire/re-distill) and a live boot (4 catalog refreshes + 3
   `_mc/` notes auto-committed; a second boot writes nothing).
 
-### M14 — Vault page in the dashboard
+### M14 — Vault page in the dashboard  ✅ shipped 2026-09-03
 - File tree over the vault, note viewer/editor, search, and the write
   activity feed (who / what / when) with one-click git revert of a single
   write.
 - `needs-review` notes flagged in the list. No per-agent-card vault chips.
+- Shipped notes: `#/vault` sidebar page — three panes (tree | note | feed)
+  plus full-text search over the tree pane. Tree rows carry type/updated and
+  an amber ⚑ per needs-review note (folder headers count theirs; the header
+  "⚑ Needs review" button filters to flagged). Viewer shows frontmatter
+  chips and a Markdown render (headings/lists/links/fences); the editor
+  works on raw text, frontmatter included — the same validation path as an
+  agent's `vault_write` — and there's a one-click flag/clear plus new-note
+  creation. The feed is the vault's git log: subject parsed into action +
+  path + reserved-folder flag + revert detection, `▤` shows the commit
+  patch, `↩` runs `git revert --no-edit` under the vault lock (conflicts
+  abort cleanly and surface a 409; the revert commits as `mission-control`).
+  Routes: `GET /api/vault/notes|note|search|feed|commit`, `PUT /api/vault/note`,
+  `POST /api/vault/revert`, guarded by a `requireVault()` disabled/not-ready
+  check. Writes from the dashboard poll (20s) — agent writes land via MCP
+  processes nothing can push from. Fix that surfaced: bare YAML `true/false`
+  in frontmatter now parse as booleans, so a `needs-review: true` written by
+  `vault_write` actually round-trips (previously it read back as the string
+  "true" and never flagged). Verified: 26 scratch-vault assertions (feed
+  parsing incl. reserved/revert rows, revert of update/create, conflicting
+  revert 409 + lock released, hash guards, needs-review, search) and the
+  full write→flag→revert cycle live against the real vault on a second
+  server instance (port 1970).
+
+---
+
+# Round 4 — planning interview 2026-09-03
+
+## Context from the interview
+
+- Prompted by an Anthropic invoice (Max plan - 20x, £150 + VAT = £180/mo,
+  billed 1st of the month): agents backed by a flat-rate subscription rather
+  than pay-as-you-go API billing have no way to record what that
+  subscription actually costs or when it renews. M5's existing
+  `estimated_cost_usd` (list-price-if-metered) already covers the "what
+  would this have cost" side; this covers the "what am I actually paying"
+  side.
+- Other Round 4 questions (M9/M10/M13/M14 prioritization, board's fate,
+  vault UX beyond M14, adapter usage in practice, sub-agent display, revisiting
+  declined items) went unanswered — not wanted right now.
+
+## Milestones (in order)
+
+### M15 — Subscription billing on agent config
+- New fields on an agent's config: plan name, cost (amount + currency),
+  billing period, and renewal date — entered by the user, one agent at a
+  time (no shared/linked subscriptions across agents).
+- Cost dashboard (M5) shows the subscription as a real line item next to the
+  existing actual/estimated API-cost figures, not just metadata on the card.
+- Reminder alert one day before the renewal date, through the existing
+  notification channels (Telegram/email).
+
+### M16 — Voice prompting
+- Two transcription backends, picked per use: OpenAI Whisper API (needs a
+  key), and Claude Code's own built-in voice/dictation for that adapter.
+- Not specified in the interview, so defaulting to the pattern M6 already
+  uses for other input methods: lands in the chat composer as editable text
+  for review before send, not an auto-send; dashboard composer only for now,
+  no Telegram voice messages.
 

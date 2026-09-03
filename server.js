@@ -146,6 +146,46 @@ app.put('/api/vault', wrap(async (req, res) => {
   res.json(await manager.setVaultSettings(req.body || {}));
 }));
 
+// Vault browser (M14): the dashboard reads and edits the same vault the
+// agents see through MCP; the write activity feed is the vault's git log.
+app.get('/api/vault/notes', wrap((req, res) => res.json(manager.requireVault().index())));
+
+app.get('/api/vault/note', wrap((req, res) => {
+  res.json(manager.requireVault().read(String(req.query.path || '')));
+}));
+
+app.put('/api/vault/note', wrap(async (req, res) => {
+  const { path, content, needsReview } = req.body || {};
+  if (path === undefined || content === undefined) {
+    throw Object.assign(new Error('Missing path or content'), { status: 400 });
+  }
+  const opts = { content: String(content) };
+  if (needsReview !== undefined) opts.needsReview = !!needsReview;
+  res.json(await manager.requireVault().write(String(path), opts));
+}));
+
+app.get('/api/vault/search', wrap((req, res) => {
+  res.json(manager.requireVault().search({
+    query: req.query.query,
+    type: req.query.type,
+    project: req.query.project,
+    tag: req.query.tag,
+    limit: req.query.limit,
+  }));
+}));
+
+app.get('/api/vault/feed', wrap(async (req, res) => {
+  res.json(await manager.requireVault().log(Math.min(+req.query.limit || 60, 200)));
+}));
+
+app.get('/api/vault/commit', wrap(async (req, res) => {
+  res.json(await manager.requireVault().show(String(req.query.hash || '')));
+}));
+
+app.post('/api/vault/revert', wrap(async (req, res) => {
+  res.json(await manager.requireVault().revert(String((req.body || {}).hash || '')));
+}));
+
 app.get('/api/feed', wrap((req, res) => {
   res.json(manager.feed(Math.min(+req.query.limit || 60, 200)));
 }));

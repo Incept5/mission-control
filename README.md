@@ -208,6 +208,31 @@ so git history is the audit log of who wrote what. A run of the same project
 outside Mission Control sees none of this: access exists only where MC
 granted it, and nothing is ever written into your projects' own files.
 
+### Vault page
+
+The **Vault** page (sidebar) is the human window onto all of this — three
+panes plus search:
+
+- **Tree** — every note in the vault grouped by folder (`notes/`,
+  `_catalog/`, `_mc/`), with an amber ⚑ on notes flagged `needs-review`
+  (the header button filters the tree down to them). Search the vault
+  full-text from the box at the top; results carry a snippet.
+- **Note** — frontmatter as chips (type, project, tags, author, updated)
+  above a rendered view. ✎ Edit opens the raw text — frontmatter included,
+  validated exactly like an agent's `vault_write`; + New note creates one
+  (bare names land in `notes/`). ⚑ Flag / ✓ Clear toggles a note's
+  `needs-review` state.
+- **Write activity** — the feed of every write (who / what / when, newest
+  first), taken from the vault's git log: agent writes land here too,
+  wherever they came from. `▤` shows the commit's diff; `↩` reverts that
+  single write with one click — a new commit restores the previous content,
+  history keeps both, and a conflicting revert (a later write hit the same
+  lines) is refused with the reason rather than half-applied. Writes into
+  the reserved `_catalog/` / `_mc/` folders carry a ⚑ reserved marker.
+
+The page polls while it's open, so writes made by running agents appear on
+their own. When the vault is disabled, the page says so and can enable it.
+
 ## How the Claude Code agent works
 
 Each chat message spawns `claude -p <message> --output-format stream-json`,
