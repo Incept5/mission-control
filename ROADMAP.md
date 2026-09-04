@@ -301,3 +301,53 @@ mission control, and how its own work fits the whole.
   a scratch instance on port 1970 — routes, guards, and a live OpenAI round
   trip that reached their API and rejected only the deliberately fake key.
 
+---
+
+# Direct request — 2026-09-04
+
+Not from a planning interview: the user asked in-session for a way to start
+several agents at once — e.g. one Claude Code agent in one workspace and
+another in a different workspace, concurrently — and to visualise them running
+together. Recorded as M17 to keep the milestone numbering continuous.
+
+### M17 — Fleet launch + run timeline  ✅ shipped 2026-09-04
+- Launch N agent/prompt pairs in one action (project, agent type, prompt per
+  row). Every row runs concurrently: busy agents are never stolen, so N rows
+  always means N agents working at once (up to a 12-row cap).
+- Swimlane timeline of runs per agent over a shared window, with live
+  in-flight bars, failure marking, and click/hover detail.
+
+Shipped notes: `POST /api/fleet/launch` → `AgentManager.launchFleet(rows)`.
+Rows validate (blank prompt / unknown type / unknown project → 400/404) and
+claim agents of the right type that are online, idle, and queue-less —
+preferring one already on the row's project (`reused`, keeps its session
+history), then any project-less one (`repointed` via the normal project
+pointer), then any idle one; if none, a dynamic agent is spawned ("\<Project\>
+agent" / "Fleet \<Type\> agent"). Runs carry origin kind `fleet`, so the ⁂
+chips from M8 label them everywhere. `GET /api/fleet/timeline?window=` pairs
+each `user_prompt` with its `result` (error / `is_error` / non-success
+subtype → failed), adds the in-flight run from the live run record with the
+M8 estimate, clamps the window to 10min–7d, and returns one lane per agent
+(running lanes first). `#/fleet` page: composer rows + stat tiles (running
+now / agents / runs in window / queued — patched on every refresh, not just
+first render), lanes coloured by agent with identity in the labelled gutters
+(never colour alone — the chart-bar accents needed darker same-hue twins,
+`FLEET_CHART_COLORS`, validated against the dark surface), window selector,
+hover tooltip, click-for-detail. Geometry is frozen between refetches
+({since, now} captured per fetch) so bars don't crawl; run clocks tick
+locally every second; WS events refetch on a 1.5s debounce plus a 5s poll
+while anything is in flight. Legend explains treatments, not identity:
+solid = complete, red = failed, hatched + pulse = in flight (the hatch keeps
+running distinct from complete in screenshots/print/CVD, where the pulse is
+lost). Fixes that surfaced en route: the availability probe could land after
+a run started and stomp `working` back to `online` — both adapters'
+`execFile` callbacks now no-op when `isBusy()`; and agent-status broadcasts
+re-rendered whatever page was open, yanking the view off vault/analytics/
+alerts to home — `onStatusChanged` now guards with `onOtherPage()`. Ops:
+`MC_ROOT` env override gives a fully sandboxed second instance (its own
+`data/`, workspaces) — how this was verified end-to-end (34 scratch
+assertions on validation, concurrency, all three claim modes, run pairing,
+windows, failure pairing, and broadcasts; plus a live 3-row launch on
+port 1970 against a stub `claude` exercising reused/repointed/spawned, with
+screenshots eyeballed mid-flight and at rest).
+

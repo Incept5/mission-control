@@ -22,6 +22,7 @@ const state = {
   vault: null,           // Vault page: { sel, editing, draft, q, flaggedOnly, expanded:Set }
   cliSessions: [],       // live external CLI sessions (from /api/cli-sessions)
   cliFetchedAt: 0,
+  fleet: null,           // Fleet page (M17): { rows, windowMs, types, data, sel }
   connected: false,
 };
 
@@ -191,6 +192,10 @@ function handleServerMsg(msg) {
       state.anTimer = setTimeout(renderAnalytics, 700);
       return;
     }
+    if (onFleetPage()) {
+      scheduleFleetRefresh();
+      return;
+    }
     onAgentEvent(msg.agentId, msg.event);
     return;
   }
@@ -232,11 +237,15 @@ function onAnalyticsPage() {
   return location.hash.startsWith('#/analytics');
 }
 
+function onFleetPage() {
+  return location.hash.startsWith('#/fleet');
+}
+
 // True on any route that isn't the agent view or the home dashboard, so
 // background broadcasts (agent/project list updates) don't yank the user
 // back to the dashboard while they're looking at one of these pages.
 function onOtherPage() {
-  return onProjectsPage() || onBoardPage() || onAlertsPage() || onAnalyticsPage() || onVaultPage() || !!currentProjectHistoryId();
+  return onProjectsPage() || onBoardPage() || onAlertsPage() || onAnalyticsPage() || onVaultPage() || onFleetPage() || !!currentProjectHistoryId();
 }
 
 async function route() {
@@ -248,6 +257,7 @@ async function route() {
   if (onAlertsPage()) return renderAlerts();
   if (onAnalyticsPage()) return renderAnalytics();
   if (onVaultPage()) return renderVault();
+  if (onFleetPage()) return renderFleet();
   if (!id) return renderHome();
   const agent = getAgent(id);
   if (!agent) return renderHome();
@@ -264,7 +274,8 @@ window.addEventListener('hashchange', route);
 
 function renderSidebar() {
   const id = currentAgentId();
-  $('.nav-item[data-route="home"]').classList.toggle('active', !id && !onProjectsPage() && !onBoardPage() && !onAlertsPage() && !onAnalyticsPage() && !onVaultPage());
+  $('.nav-item[data-route="home"]').classList.toggle('active', !id && !onProjectsPage() && !onBoardPage() && !onAlertsPage() && !onAnalyticsPage() && !onVaultPage() && !onFleetPage());
+  $('.nav-item[data-route="fleet"]').classList.toggle('active', onFleetPage());
   $('.nav-item[data-route="projects"]').classList.toggle('active', onProjectsPage() || !!currentProjectHistoryId());
   $('.nav-item[data-route="board"]').classList.toggle('active', onBoardPage());
   $('.nav-item[data-route="alerts"]').classList.toggle('active', onAlertsPage());
@@ -365,8 +376,13 @@ function renderHome() {
 
   main.replaceChildren(
     el('div', { class: 'page' },
-      el('h1', { class: 'page-title' }, 'MISSION CONTROL'),
-      el('p', { class: 'page-sub' }, 'Live status of every agent in the fleet.'),
+      el('div', { class: 'home-head' },
+        el('div', {},
+          el('h1', { class: 'page-title' }, 'MISSION CONTROL'),
+          el('p', { class: 'page-sub' }, 'Live status of every agent in the fleet.'),
+        ),
+        el('a', { class: 'btn primary sm', href: '#/fleet' }, '⁂ Launch fleet'),
+      ),
       el('div', { class: 'stats' },
         statTile(state.agents.length, 'Agents registered'),
         statTile(online, 'Online', online > 0 ? 'var(--green)' : null),
@@ -439,6 +455,368 @@ async function refreshCliSessions() {
   }
 }
 
+/* ── Fleet launch + timeline (M17) ───────────────────────────────── */
+
+// Chart ink for the timeline: the UI accent colours are too light for data
+// marks on the dark panels, so bars wear these darker same-hue twins. The
+// mapping keeps colour following the entity (an agent's bar is always its own
+// accent's hue) and the set is validated for the dark surface (OKLCH L band,
+// chroma, CVD and normal-vision separation, 3:1 contrast).
+const FLEET_CHART_COLORS = {
+  '#d97757': '#cf5c30',
+  '#5eb0ff': '#4a90e2',
+  '#34d399': '#17a673',
+  '#fbbf24': '#b5860d',
+  '#c084fc': '#9d5ce0',
+  '#f472b6': '#d94f8a',
+};
+
+function fleetChartColor(accent) {
+  return FLEET_CHART_COLORS[String(accent || '').toLowerCase()] || '#4a90e2';
+}
+
+const FLEET_WINDOWS = [
+  { label: 'Last hour', ms: 3600e3 },
+  { label: 'Last 6 hours', ms: 6 * 3600e3 },
+  { label: 'Last 24 hours', ms: 24 * 3600e3 },
+  { label: 'Last 7 days', ms: 7 * 864e5 },
+];
+
+function fleetEmptyRow() {
+  return { projectId: '', type: 'claude-code', prompt: '' };
+}
+
+function fleetState() {
+  // Composer rows and the selected window live in state so WS-driven
+  // re-renders of the timeline never eat what's being typed.
+  if (!state.fleet) {
+    state.fleet = {
+      rows: [fleetEmptyRow()],
+      windowMs: 6 * 3600e3,
+      types: null,   // cached /api/agent-types
+      data: null,    // last /api/fleet/timeline response
+      sel: null,     // selected bar key `${agentId}:${start}`
+    };
+  }
+  return state.fleet;
+}
+
+// The stat tiles are patched on every timeline refresh (new runs land, agents
+// get spawned by launches) rather than only on the page's first render.
+function fleetStats() {
+  const lanes = state.fleet?.data?.lanes || [];
+  return {
+    running: lanes.filter((l) => l.runs.some((r) => r.running)).length,
+    agents: state.agents.length,
+    inWindow: lanes.reduce((s, l) => s + l.runs.filter((r) => !r.running).length, 0),
+    queued: state.agents.reduce((s, a) => s + (a.status?.queue?.length || 0), 0),
+  };
+}
+
+function fleetStatTile(key, value, label, color) {
+  const tile = statTile(value, label, color);
+  tile.querySelector('.stat-value').id = 'fleet-stat-' + key;
+  return tile;
+}
+
+function updateFleetStats() {
+  const s = fleetStats();
+  const set = (key, text, color) => {
+    const node = $('#fleet-stat-' + key);
+    if (node) { node.textContent = text; node.style.color = color || ''; }
+  };
+  set('running', String(s.running), s.running > 0 ? 'var(--green)' : '');
+  set('agents', String(s.agents));
+  set('runs', String(s.inWindow));
+  set('queued', String(s.queued), s.queued > 0 ? 'var(--amber)' : '');
+}
+
+async function renderFleet() {
+  const f = fleetState();
+  if (!f.types) {
+    try { f.types = await api('/api/agent-types'); } catch { f.types = []; }
+  }
+  const s = fleetStats();
+
+  main.replaceChildren(
+    el('div', { class: 'page' },
+      el('h1', { class: 'page-title' }, 'FLEET'),
+      el('p', { class: 'page-sub' }, 'Start several agents at once — one per workspace — and watch every run across the fleet.'),
+      el('div', { class: 'stats' },
+        fleetStatTile('running', s.running, 'Running now', s.running > 0 ? 'var(--green)' : null),
+        fleetStatTile('agents', s.agents, 'Agents'),
+        fleetStatTile('runs', s.inWindow, 'Runs in window'),
+        fleetStatTile('queued', s.queued, 'Queued tasks', s.queued > 0 ? 'var(--amber)' : null),
+      ),
+      el('div', { class: 'panel' },
+        el('h3', {}, 'Launch agents'),
+        el('div', { class: 'fleet-hint' },
+          'Each row claims an idle agent of its type — reusing one already in that workspace, repointing a free one, or spawning a fresh agent — so every row runs concurrently.'),
+        el('div', { id: 'fleet-rows' }, ...f.rows.map((row, i) => fleetRow(f, row, i))),
+        el('div', { class: 'fleet-composer-foot' },
+          el('button', {
+            class: 'btn sm',
+            onclick: () => { f.rows.push(fleetEmptyRow()); $('#fleet-rows').append(fleetRow(f, f.rows[f.rows.length - 1], f.rows.length - 1)); },
+          }, '+ Add agent'),
+          el('button', { class: 'btn primary', onclick: launchFleetRows }, 'Launch agents'),
+          el('span', { class: 'fleet-note' }, 'Idle agents are reused before new ones are spawned.'),
+        ),
+      ),
+      el('div', { class: 'panel' },
+        el('div', { class: 'fleet-tl-head' },
+          el('h3', {}, 'Runs across the fleet'),
+          el('div', { class: 'fleet-legend' },
+            el('span', { class: 'fleet-leg-item', title: 'A completed run, in its agent\'s colour' },
+              el('span', { class: 'fleet-leg-swatch done' }), 'run'),
+            el('span', { class: 'fleet-leg-item' }, el('span', { class: 'fleet-leg-swatch failed' }), 'failed'),
+            el('span', { class: 'fleet-leg-item', title: 'In flight — the bar grows until the run ends' },
+              el('span', { class: 'fleet-leg-swatch running' }), 'running'),
+          ),
+          el('select', {
+            class: 'hdr-model',
+            onchange: (e) => { f.windowMs = +e.target.value; f.data = null; refreshFleetTimeline(); },
+          }, FLEET_WINDOWS.map((w) => el('option', {
+            value: String(w.ms),
+            selected: w.ms === f.windowMs ? '' : null,
+          }, w.label))),
+        ),
+        el('div', { id: 'fleet-tl' }, el('div', { class: 'fleet-empty' }, 'Loading timeline…')),
+        el('div', { id: 'fleet-detail' }),
+      ),
+    )
+  );
+  refreshFleetTimeline();
+}
+
+function fleetRow(f, row, i) {
+  const typeOptions = (f.types || []).some((t) => t.type === row.type) ? f.types : [{ type: row.type, label: row.type }, ...(f.types || [])];
+  return el('div', { class: 'fleet-row' },
+    el('select', {
+      class: 'hdr-model fleet-row-proj', title: 'Where this agent works',
+      onchange: (e) => { row.projectId = e.target.value; },
+    },
+      el('option', { value: '' }, 'Own workspace'),
+      state.projects.map((p) => el('option', {
+        value: p.id, selected: p.id === row.projectId ? '' : null,
+      }, p.name)),
+    ),
+    el('select', {
+      class: 'hdr-model fleet-row-type', title: 'Agent type',
+      onchange: (e) => { row.type = e.target.value; },
+    }, typeOptions.map((t) => el('option', {
+      value: t.type, selected: t.type === row.type ? '' : null,
+    }, t.label))),
+    el('input', {
+      class: 'fleet-row-prompt', placeholder: 'Prompt for this agent…', value: row.prompt,
+      oninput: (e) => { row.prompt = e.target.value; },
+      onkeydown: (e) => { if (e.key === 'Enter') launchFleetRows(); },
+    }),
+    el('button', {
+      class: 'btn sm danger fleet-row-x', title: 'Remove this row',
+      onclick: () => {
+        f.rows.splice(f.rows.indexOf(row), 1);
+        if (!f.rows.length) f.rows.push(fleetEmptyRow());
+        renderFleet();
+      },
+    }, '✕'),
+  );
+}
+
+async function launchFleetRows() {
+  const f = fleetState();
+  const rows = f.rows.filter((r) => r.prompt.trim());
+  if (!rows.length) return toast('Add at least one prompt to launch', true);
+  if (rows.length < f.rows.length) {
+    toast(`${f.rows.length - rows.length} row(s) without a prompt were skipped`, true);
+  }
+  try {
+    const res = await api('/api/fleet/launch', {
+      method: 'POST',
+      body: { rows: rows.map((r) => ({ projectId: r.projectId || null, type: r.type, prompt: r.prompt.trim() })) },
+    });
+    const modes = res.launched.map((l) => `${l.agentName} (${l.mode})`).join(' · ');
+    toast(`Launched ${res.launched.length} agent${res.launched.length === 1 ? '' : 's'} — ${modes}`);
+    f.rows = [fleetEmptyRow()];
+    f.sel = null;
+    renderFleet();
+  } catch (err) {
+    toast(err.message, true);
+  }
+}
+
+// Timeline refresh cadence: agent events/status changes debounce a refetch,
+// and a slow interval keeps running bars growing even when a run goes quiet.
+let fleetRefreshTimer = null;
+
+function scheduleFleetRefresh() {
+  if (!onFleetPage()) return;
+  clearTimeout(fleetRefreshTimer);
+  fleetRefreshTimer = setTimeout(refreshFleetTimeline, 1500);
+}
+
+async function refreshFleetTimeline() {
+  if (!onFleetPage()) return;
+  const f = fleetState();
+  let data;
+  try {
+    data = await api(`/api/fleet/timeline?window=${f.windowMs}`);
+  } catch {
+    return;
+  }
+  if (!onFleetPage()) return; // user navigated away mid-fetch
+  f.data = data;
+  drawFleetTimeline();
+}
+
+// A "nice" axis step: the smallest round step that gives ~6 ticks.
+function fleetNiceStep(rangeMs) {
+  const steps = [60e3, 5 * 60e3, 10 * 60e3, 15 * 60e3, 30 * 60e3, 3600e3, 3 * 3600e3, 6 * 3600e3, 12 * 3600e3, 864e5];
+  const target = rangeMs / 6;
+  for (const s of steps) if (s >= target) return s;
+  return 864e5;
+}
+
+function fleetTickLabel(ts, step) {
+  const d = new Date(ts);
+  if (step >= 864e5) {
+    return d.toLocaleDateString([], { weekday: 'short' }) + ' ' + d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+  }
+  return d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+}
+
+// Position math is frozen to the fetched {since, now} so bars stay put between
+// refetches; the running bar's width and the gutter clocks advance on refresh.
+function drawFleetTimeline() {
+  const wrap = $('#fleet-tl');
+  if (!wrap) return;
+  const f = fleetState();
+  const data = f.data;
+  if (!data) return;
+  const range = Math.max(1, data.now - data.since);
+  const pct = (ts) => Math.min(100, Math.max(0, ((ts - data.since) / range) * 100));
+  const step = fleetNiceStep(range);
+  const ticks = [];
+  for (let t = Math.ceil(data.since / step) * step; t <= data.now; t += step) ticks.push(t);
+
+  const gridlines = el('div', { class: 'fleet-gridlines' },
+    ticks.map((t) => el('div', { class: 'fleet-gline', style: `left:${pct(t)}%` })));
+
+  const lanes = data.lanes.map((lane) => {
+    const color = fleetChartColor(lane.accent);
+    const isRunning = lane.runs.some((r) => r.running);
+    const bars = lane.runs.map((run) => {
+      const left = pct(run.start);
+      const right = pct(Math.min(run.running ? data.now : run.end, data.now));
+      // Short runs get a visible sliver, pulled back inside the right edge.
+      const width = Math.max(right - left, 0.35);
+      const key = `${lane.id}:${run.start}`;
+      return el('button', {
+        class: 'fleet-bar' + (run.running ? ' running' : '') + (run.failed ? ' failed' : '') + (f.sel === key ? ' selected' : ''),
+        style: `left:${Math.min(left, 100 - width)}%;width:${width}%;background:${run.failed ? 'var(--red)' : color}`,
+        title: run.prompt,
+        onclick: () => { f.sel = f.sel === key ? null : key; drawFleetTimeline(); },
+        onmouseenter: (e) => fleetTip(e, lane, run, color),
+        onmousemove: (e) => fleetTip(e, lane, run, color),
+        onmouseleave: fleetTipHide,
+      });
+    });
+    const liveRun = getAgent(lane.id)?.status?.run;
+    return el('div', { class: 'fleet-lane' },
+      el('div', { class: 'fleet-lane-label', title: `${lane.name}${lane.project ? ' · ' + lane.project : ''}` },
+        el('span', { class: 'fleet-swatch' + (isRunning ? ' running' : ''), style: `background:${color}` }),
+        el('a', { class: 'fleet-lane-name' + (lane.state === 'offline' ? ' offline' : ''), href: `#/agent/${encodeURIComponent(lane.id)}` }, lane.name),
+        lane.project ? el('span', { class: 'fleet-lane-proj' }, lane.project) : null,
+        lane.queue ? el('span', { class: 'fleet-lane-queue' }, `⧗ ${lane.queue}`) : null,
+        isRunning && liveRun ? runClock(liveRun, 'sm') : null,
+      ),
+      el('div', { class: 'fleet-track' },
+        bars.length ? bars : el('span', { class: 'fleet-track-empty' }, 'no runs in this window'),
+      ),
+    );
+  });
+
+  wrap.replaceChildren(
+    lanes.length ? el('div', { class: 'fleet-tl' },
+      el('div', { class: 'fleet-axis-row' },
+        el('div', { class: 'fleet-gutter' }),
+        el('div', { class: 'fleet-axis' },
+          ticks.map((t) => el('span', { class: 'fleet-tick', style: `left:${pct(t)}%` }, fleetTickLabel(t, step)))),
+      ),
+      el('div', { class: 'fleet-lanes' }, gridlines, lanes),
+    ) : el('div', { class: 'fleet-empty' }, 'No agents yet — launch one above.'),
+  );
+  updateFleetStats();
+  drawFleetDetail();
+}
+
+// Run details under the timeline for the selected bar (also the accessible,
+// non-hover record of every field the tooltip shows).
+function drawFleetDetail() {
+  const detail = $('#fleet-detail');
+  if (!detail) return;
+  const f = fleetState();
+  if (!f.sel) {
+    detail.replaceChildren(el('span', { class: 'fleet-note' }, 'Click a bar for run details.'));
+    return;
+  }
+  const [agentId, startStr] = [f.sel.slice(0, f.sel.lastIndexOf(':')), +f.sel.slice(f.sel.lastIndexOf(':') + 1)];
+  const lane = f.data?.lanes.find((l) => l.id === agentId);
+  const run = lane?.runs.find((r) => r.start === startStr);
+  if (!lane || !run) {
+    f.sel = null;
+    detail.replaceChildren(el('span', { class: 'fleet-note' }, 'Click a bar for run details.'));
+    return;
+  }
+  const stateLabel = run.running ? `running · ${fmtClock(Date.now() - run.start)} elapsed` : run.failed ? 'failed' : 'complete';
+  detail.replaceChildren(
+    el('a', { class: 'fleet-lane-name', href: `#/agent/${encodeURIComponent(lane.id)}` }, lane.name),
+    el('span', {}, run.pid ? projName(run.pid) : 'default workspace'),
+    el('span', {}, stateLabel),
+    el('span', {}, `took ${fmtClock(run.durationMs || 0)}`),
+    run.running && run.estimateMs ? el('span', {}, `~${fmtClock(run.estimateMs)} est. (${run.estimateBasis})`) : null,
+    typeof run.cost === 'number' ? el('span', {}, fmtCost(run.cost, run.estimated)) : null,
+    el('span', {}, new Date(run.start).toLocaleString()),
+    originChip(run.origin) || el('span', { class: 'fleet-note' }, 'no origin'),
+    el('div', { class: 'fleet-detail-prompt' }, run.prompt || '(no prompt text)'),
+  );
+}
+
+// Floating tooltip for a run bar. One shared node; positioned by cursor.
+let fleetTipNode = null;
+
+function fleetTip(e, lane, run, color) {
+  if (!fleetTipNode) {
+    fleetTipNode = el('div', { class: 'fleet-tip' });
+    document.body.append(fleetTipNode);
+  }
+  const stateLabel = run.running ? 'running' : run.failed ? 'failed' : 'complete';
+  fleetTipNode.replaceChildren(
+    el('div', { class: 'fleet-tip-head' },
+      el('span', { class: 'fleet-swatch', style: `background:${color}` }),
+      el('strong', {}, lane.name),
+      el('span', { class: run.failed ? 'fleet-tip-state failed' : 'fleet-tip-state' }, stateLabel),
+    ),
+    el('div', { class: 'fleet-tip-line' }, run.pid ? projName(run.pid) : 'default workspace'),
+    el('div', { class: 'fleet-tip-line' }, `${fmtClock(run.durationMs || 0)} · ${new Date(run.start).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}`),
+    run.prompt ? el('div', { class: 'fleet-tip-prompt' }, run.prompt) : null,
+  );
+  fleetTipNode.style.display = 'block';
+  const x = Math.min(e.clientX + 14, window.innerWidth - 360);
+  fleetTipNode.style.left = x + 'px';
+  fleetTipNode.style.top = Math.max(8, e.clientY - 12) + 'px';
+}
+
+function fleetTipHide() {
+  if (fleetTipNode) fleetTipNode.style.display = 'none';
+}
+
+// Keep running bars growing and idle pages honest even without WS traffic.
+setInterval(() => {
+  if ($('#fleet-tl') && state.fleet?.data?.lanes?.some((l) => l.runs.some((r) => r.running))) {
+    refreshFleetTimeline();
+  }
+}, 5000);
+
 /* ── Run origin + duration estimate ──────────────────────────────── */
 
 // Human label for where a run came from: chat, a board card, or the queue
@@ -448,8 +826,9 @@ function originLabel(origin) {
   const card = origin.taskTitle ? ' · ' + origin.taskTitle : '';
   if (origin.kind === 'chat') return '💬 chat';
   if (origin.kind === 'board') return '⌗ board' + card;
+  if (origin.kind === 'fleet') return '⁂ fleet';
   if (origin.kind === 'queue') {
-    const via = origin.via === 'board' ? '⌗ board' + card : '💬 chat';
+    const via = origin.via === 'board' ? '⌗ board' + card : origin.via === 'fleet' ? '⁂ fleet' : '💬 chat';
     return '⧗ queue ← ' + via;
   }
   return origin.kind;
@@ -2071,7 +2450,10 @@ function onStatusChanged(agentId) {
     populateProjectSelect(agent);
   } else if (onBoardPage()) {
     renderBoard();
-  } else if (!currentAgentId() && !onProjectsPage()) {
+  } else if (onFleetPage()) {
+    // New agent (spawned by a fleet launch) or state change — refetch lanes.
+    scheduleFleetRefresh();
+  } else if (!currentAgentId() && !onOtherPage()) {
     renderHome();
   }
 }

@@ -29,7 +29,7 @@ function broadcast(msg) {
   }
 }
 
-const manager = new AgentManager(agentsConfig, broadcast, __dirname);
+const manager = new AgentManager(agentsConfig, broadcast, process.env.MC_ROOT || __dirname);
 const notifier = new Notifier(path.join(__dirname, 'data'));
 manager.notifier = notifier;
 manager.init();
@@ -72,6 +72,20 @@ app.delete('/api/agents/:id/queue/:taskId', wrap((req, res) => {
 app.post('/api/agents/:id/queue/reorder', wrap((req, res) => {
   manager.reorderQueue(req.params.id, (req.body || {}).order);
   res.json({ ok: true });
+}));
+
+// Fleet launch (M17): start several agents at once, each row claiming an idle
+// agent of its type (repointed as needed) or spawning a new one, so all rows
+// run concurrently in their own workspace/project.
+app.post('/api/fleet/launch', wrap((req, res) => {
+  const body = req.body || {};
+  res.json(manager.launchFleet(Array.isArray(body) ? body : body.rows));
+}));
+
+// Swimlane data for the fleet timeline: past runs overlapping the window plus
+// whatever is in flight right now.
+app.get('/api/fleet/timeline', wrap((req, res) => {
+  res.json(manager.timeline(+req.query.window || 0));
 }));
 
 // Filesystem browsing for the folder-picker dialog (directories only).
