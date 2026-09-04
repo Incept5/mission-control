@@ -10,6 +10,7 @@ const git = require('./lib/git');
 const Notifier = require('./lib/notify');
 const claudeStore = require('./lib/claude-store');
 const cliSessions = require('./lib/cli-sessions');
+const voice = require('./lib/voice');
 const agentsConfig = require('./agents.config');
 
 const PORT = process.env.PORT || 1969;
@@ -123,6 +124,25 @@ app.post('/api/agents/:id/attach', wrap((req, res) => {
   const file = path.join(dir, Date.now() + '-' + safe);
   fs.writeFileSync(file, Buffer.from(dataBase64, 'base64'));
   res.json({ path: file, name: safe });
+}));
+
+// Voice prompting (M16): Whisper settings (key + model) under `_voice` in
+// settings.json, and the transcription endpoint itself. Audio arrives base64
+// like chat attachments; browser dictation never touches the server.
+app.get('/api/voice', wrap((req, res) => res.json(manager.voiceConfig())));
+
+app.put('/api/voice', wrap((req, res) => {
+  res.json(manager.updateVoice(req.body || {}));
+}));
+
+app.post('/api/transcribe', wrap(async (req, res) => {
+  const { dataBase64, mime } = req.body || {};
+  if (!dataBase64) throw Object.assign(new Error('Missing audio data'), { status: 400 });
+  const buffer = Buffer.from(String(dataBase64), 'base64');
+  if (!buffer.length) throw Object.assign(new Error('Audio data is empty'), { status: 400 });
+  // 20MB decoded keeps the base64 payload under the 30mb express JSON limit.
+  if (buffer.length > 20 * 1024 * 1024) throw Object.assign(new Error('Recording too large for Whisper (20MB max)'), { status: 400 });
+  res.json(await voice.whisper(manager.voiceConfig(), buffer, String(mime || '')));
 }));
 
 app.get('/api/prompts', wrap((req, res) => res.json(manager.listPrompts())));

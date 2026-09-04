@@ -17,6 +17,8 @@ const state = {
   agentProj: {},         // agentId -> last seen project id (change detection)
   agentCid: {},          // agentId -> last seen conversation id
   projEdit: null,        // project id currently being edited on Projects page
+  voice: null,           // active voice session (M16): recorder or dictation, one at a time
+  voiceCfg: null,        // { at, whisperKey } cache for the 🎤 picker
   vault: null,           // Vault page: { sel, editing, draft, q, flaggedOnly, expanded:Set }
   cliSessions: [],       // live external CLI sessions (from /api/cli-sessions)
   cliFetchedAt: 0,
@@ -2132,12 +2134,305 @@ function readRef(dt) {
   }
 }
 
+/* ── Voice prompting (M16) ────────────────────────────────────────── */
+
+// Two transcription backends, picked per use from the 🎤 button:
+// - Whisper — the browser records a clip, the server sends it to OpenAI's
+//   transcription API (key + model configured in the picker's settings).
+// - Built-in dictation — the browser's own SpeechRecognition, no key. Claude
+//   Code's hold-to-talk can't be driven headlessly through the CLI, so this is
+//   the dashboard's keyless equivalent, and it works for every adapter.
+// Both land in the composer as editable text — nothing is ever auto-sent. The
+// session lives in module state so a chat re-render (project/conversation
+// change) doesn't kill a recording in progress.
+const SpeechRec = window.SpeechRecognition || window.webkitSpeechRecognition || null;
+const VOICE_MAX_MS = 120 * 1000;   // auto-stop long Whisper recordings
+let voiceTimer = null;
+let voiceEsc = null;
+
+function fmtElapsed(ms) {
+  const s = Math.floor(ms / 1000);
+  return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, '0')}`;
+}
+
+// Drop transcribed text into the live composer — or the draft store if the
+// chat view has moved on — following the prompt library's append pattern.
+function insertComposerText(agentId, text) {
+  const input = $('#composer-input');
+  if (input && currentAgentId() === agentId) {
+    input.value = input.value ? input.value.replace(/\s+$/, '') + '\n' + text : text;
+    input.dispatchEvent(new Event('input'));   // re-grow + re-save draft
+    input.focus();
+  } else {
+    state.drafts[agentId] = state.drafts[agentId]
+      ? state.drafts[agentId].replace(/\s+$/, '') + '\n' + text : text;
+  }
+}
+
+// The live mic button (one composer is rendered at a time) mirrors the session.
+function updateMicBtns() {
+  const btn = $('.mic-btn');
+  if (!btn) return;
+  const v = state.voice && state.voice.agentId === currentAgentId() ? state.voice : null;
+  if (!v) {
+    btn.classList.remove('rec');
+    btn.textContent = '🎤';
+    return;
+  }
+  btn.classList.add('rec');
+  btn.textContent = (v.backend === 'whisper' ? '⏺ ' : '◉ ') + fmtElapsed(Date.now() - v.startedAt);
+}
+
+function armVoiceUi() {
+  if (!voiceTimer) voiceTimer = setInterval(updateMicBtns, 500);
+  if (!voiceEsc) {
+    voiceEsc = (e) => {
+      // Esc while the composer itself has focus belongs to its own handlers
+      // (slash menu); a second Esc discards the voice session.
+      if (e.key === 'Escape' && e.target?.id !== 'composer-input') stopVoice(true);
+    };
+    document.addEventListener('keydown', voiceEsc, true);
+  }
+  updateMicBtns();
+}
+
+function disarmVoiceUi() {
+  clearInterval(voiceTimer);
+  voiceTimer = null;
+  if (voiceEsc) {
+    document.removeEventListener('keydown', voiceEsc, true);
+    voiceEsc = null;
+  }
+  updateMicBtns();
+}
+
+// Stop the active session. `discard` drops the audio/text (Esc); the normal
+// path finishes it — Whisper transcribes, dictation keeps its final text.
+function stopVoice(discard = false) {
+  const v = state.voice;
+  if (!v) return;
+  v.discard = discard;
+  if (v.backend === 'whisper') {
+    if (v.recorder.state !== 'inactive') v.recorder.stop();
+  } else {
+    try { v.rec.stop(); } catch {}   // fires onend, which finalizes
+  }
+}
+
+async function startWhisper(agent) {
+  let stream;
+  try {
+    stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+  } catch (err) {
+    toast(`Microphone unavailable: ${err.message}`, true);
+    return;
+  }
+  const mime = ['audio/webm;codecs=opus', 'audio/webm', 'audio/mp4']
+    .find((t) => MediaRecorder.isTypeSupported(t)) || '';
+  const recorder = mime ? new MediaRecorder(stream, { mimeType: mime }) : new MediaRecorder(stream);
+  const v = { backend: 'whisper', agentId: agent.id, startedAt: Date.now(), recorder, chunks: [], discard: false };
+  recorder.ondataavailable = (e) => { if (e.data.size) v.chunks.push(e.data); };
+  recorder.onstop = () => {
+    clearTimeout(v.cap);
+    stream.getTracks().forEach((t) => t.stop());
+    if (state.voice === v) {
+      state.voice = null;
+      disarmVoiceUi();
+    }
+    if (v.discard) return;
+    if (!v.chunks.length) return toast('Nothing recorded', true);
+    transcribe(agent, v.chunks, recorder.mimeType || mime);
+  };
+  recorder.start(250);
+  state.voice = v;
+  v.cap = setTimeout(() => {
+    if (state.voice === v) {
+      toast('Recording capped at 2 minutes — transcribing');
+      stopVoice();
+    }
+  }, VOICE_MAX_MS);
+  armVoiceUi();
+}
+
+async function transcribe(agent, chunks, mime) {
+  const chip = el('span', { class: 'attach-chip' }, '⧗ transcribing…');
+  $('#attach-row')?.append(chip);
+  try {
+    const blob = new Blob(chunks, { type: mime });
+    const dataUrl = await new Promise((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onload = () => resolve(reader.result);
+      reader.onerror = reject;
+      reader.readAsDataURL(blob);
+    });
+    const r = await api('/api/transcribe', {
+      method: 'POST',
+      body: { dataBase64: String(dataUrl).split(',')[1] || '', mime },
+    });
+    if (r.text) insertComposerText(agent.id, r.text);
+    else toast('Whisper returned no text', true);
+  } catch (err) {
+    toast(err.message, true);
+  } finally {
+    chip.remove();
+  }
+}
+
+function startDictate(agent) {
+  const rec = new SpeechRec();
+  rec.continuous = true;
+  rec.interimResults = true;
+  rec.lang = navigator.language || 'en-US';
+  const input = $('#composer-input');
+  const v = {
+    backend: 'dictate', agentId: agent.id, startedAt: Date.now(), rec,
+    base: input && currentAgentId() === agent.id ? input.value : (state.drafts[agent.id] || ''),
+    final: '', interim: '', expected: null, discard: false,
+  };
+  rec.onresult = (e) => {
+    v.final = '';
+    v.interim = '';
+    for (let i = 0; i < e.results.length; i++) {
+      if (e.results[i].isFinal) v.final += e.results[i][0].transcript;
+      else v.interim += e.results[i][0].transcript;
+    }
+    applyDictation(v, false);
+  };
+  rec.onerror = (e) => {
+    if (e.error !== 'no-speech' && e.error !== 'aborted') toast(`Dictation: ${e.error}`, true);
+  };
+  rec.onend = () => {
+    if (state.voice === v) {
+      state.voice = null;
+      disarmVoiceUi();
+    }
+    if (!v.discard) applyDictation(v, true);
+  };
+  try {
+    rec.start();
+  } catch (err) {
+    toast(`Dictation: ${err.message}`, true);
+    return;
+  }
+  state.voice = v;
+  v.expected = v.base;   // nothing written yet; the composer holds `base`
+  armVoiceUi();
+}
+
+// Mirror base + final (+ live interim) into the composer. If the text changed
+// underneath us — the user typed, or a send cleared the box — rebase onto what
+// is there now instead of resurrecting what we last wrote.
+function applyDictation(v, finalOnly) {
+  const live = $('#composer-input');
+  const inView = live && currentAgentId() === v.agentId;
+  const current = inView ? live.value : (state.drafts[v.agentId] || '');
+  if (current !== v.expected) {
+    v.base = current;
+    v.final = '';
+    v.interim = '';
+  }
+  const text = v.base + (finalOnly ? v.final : v.final + v.interim);
+  if (inView) {
+    live.value = text;
+    live.dispatchEvent(new Event('input'));
+    if (finalOnly) live.focus();
+  } else {
+    state.drafts[v.agentId] = text;
+  }
+  v.expected = text;
+}
+
+// Whisper settings: configured where they're used, from the 🎤 picker.
+function openVoiceModal() {
+  const keyIn = el('input', { type: 'password', placeholder: 'sk-…', autocomplete: 'off' });
+  const modelIn = el('input', { type: 'text', placeholder: 'whisper-1' });
+  const close = () => {
+    document.removeEventListener('keydown', onKey);
+    overlay.remove();
+  };
+  function onKey(e) { if (e.key === 'Escape') close(); }
+  document.addEventListener('keydown', onKey);
+  api('/api/voice')
+    .then((c) => { keyIn.value = c.whisperKey; modelIn.value = c.whisperModel; })
+    .catch(() => {});
+  const overlay = el('div', {
+    class: 'modal-overlay',
+    onclick: (e) => { if (e.target === overlay) close(); },
+  },
+    el('div', { class: 'modal modal-form' },
+      el('div', { class: 'modal-head' },
+        el('strong', {}, 'Voice — Whisper'),
+        el('button', { class: 'btn sm modal-close', onclick: close }, '✕'),
+      ),
+      el('div', { class: 'modal-body' },
+        el('div', { class: 'field' }, el('label', {}, 'OpenAI API key'), keyIn),
+        el('div', { class: 'field' }, el('label', {}, 'Model'), modelIn),
+        el('p', { class: 'hint' }, 'Used by the server to transcribe 🎤 recordings. Built-in dictation needs no key.'),
+      ),
+      el('div', { class: 'modal-foot' },
+        el('button', { class: 'btn', onclick: close }, 'Cancel'),
+        el('button', {
+          class: 'btn primary',
+          onclick: async () => {
+            try {
+              await api('/api/voice', { method: 'PUT', body: { whisperKey: keyIn.value, whisperModel: modelIn.value.trim() } });
+              state.voiceCfg = null;   // picker re-fetches next open
+              toast('Voice settings saved');
+              close();
+            } catch (err) {
+              toast(err.message, true);
+            }
+          },
+        }, 'Save'),
+      ),
+    ),
+  );
+  document.body.append(overlay);
+  keyIn.focus();
+}
+
+// Per-use backend picker on the 🎤 button.
+async function micMenu(agent, x, y) {
+  if (!state.voiceCfg || Date.now() - state.voiceCfg.at > 30000) {
+    try { state.voiceCfg = { at: Date.now(), ...(await api('/api/voice')) }; }
+    catch { state.voiceCfg = { at: Date.now(), whisperKey: '' }; }
+  }
+  const items = [];
+  if (state.voiceCfg.whisperKey) items.push({ label: '⏺ Record → Whisper', onclick: () => startWhisper(agent) });
+  if (SpeechRec) items.push({ label: '◉ Dictate — built-in, live', onclick: () => startDictate(agent) });
+  if (!items.length) {
+    items.push({ label: '🔑 Add OpenAI API key for Whisper…', onclick: openVoiceModal });
+    if (!SpeechRec) items.push({ label: 'This browser has no built-in dictation', disabled: true });
+  } else {
+    items.push({ label: '⚙ Whisper settings…', onclick: openVoiceModal });
+  }
+  showMenu(x, y, items);
+}
+
+function micButton(agent) {
+  return el('button', {
+    class: 'btn composer-btn mic-btn',
+    title: 'Voice prompt — record or dictate into the composer',
+    onclick: (e) => {
+      const v = state.voice;
+      if (v) {
+        // One session at a time: clicking again finishes it.
+        if (v.agentId !== agent.id) return toast(`Already ${v.backend === 'whisper' ? 'recording' : 'dictating'} for another agent`, true);
+        stopVoice();
+        return;
+      }
+      micMenu(agent, e.clientX, e.clientY - 10);
+    },
+  }, '🎤');
+}
+
 function renderChat(agent, body) {
   const log = el('div', { class: 'chat-log', id: 'chat-log' });
   const workingSlot = el('div', { id: 'working-slot' });
   const attachRow = el('div', { class: 'attach-row', id: 'attach-row' });
   const staged = stagedFor(agent);
   const input = el('textarea', {
+    id: 'composer-input',
     placeholder: `Message ${agent.name}…  (Enter to send, Shift+Enter for newline, paste/drop files to attach)`,
     rows: '1',
   });
@@ -2383,7 +2678,7 @@ function renderChat(agent, body) {
     workingSlot,
     el('div', { id: 'queue-slot' }),
     attachRow,
-    el('div', { class: 'composer' }, slashMenu, newSessionBtn, attachBtn, filesBtn, promptsBtn, input, sendBtn),
+    el('div', { class: 'composer' }, slashMenu, newSessionBtn, attachBtn, filesBtn, promptsBtn, micButton(agent), input, sendBtn),
   );
   // Drop targets: a row dragged from a file tree becomes a reference chip;
   // anything else (files from the OS) is uploaded as an attachment.
@@ -2410,6 +2705,7 @@ function renderChat(agent, body) {
   });
   body.replaceChildren(filesOpen ? el('div', { class: 'chat-split' }, wrap, chatFilesPanel(agent, input, filesBtn)) : wrap);
   renderAttachChips(agent);
+  updateMicBtns();   // a voice session started before this re-render keeps its button state
   if (input.value) input.dispatchEvent(new Event('input'));   // re-grow restored draft
 
   // Chat shows the active session only; older sessions live in the Sessions tab.

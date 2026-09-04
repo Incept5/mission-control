@@ -62,6 +62,12 @@ Then open **http://localhost:1969** (Apollo 11 vintage — override with `PORT=x
 - **Prompt library** — ☰ in the composer lists saved prompts (global or scoped
   to the agent's current project) and inserts them; "Manage prompts…" adds,
   edits, and deletes (stored in `data/prompts.json`).
+- **Voice prompting** — 🎤 in the composer, picked per use: record a clip that
+  the server transcribes with the Whisper API (set your OpenAI key from the
+  picker's "Whisper settings…"), or dictate live with the browser's built-in
+  speech recognition (no key, any adapter). Either way the text lands in the
+  composer as editable text — nothing is sent until you press Send. Recordings
+  cap at 2 minutes; the key lives under `_voice` in `data/settings.json`.
 - **Session export** — in a session's detail view: ⧉ Copy or ⬇ Export the
   transcript as Markdown.
 

@@ -1071,6 +1071,16 @@ body {
   background: rgba(0, 0, 0, .12);
 }
 .composer-btn.active { border-color: var(--accent); color: var(--accent); }
+/* Voice session in progress (M16): red, gently blinking, elapsed time inside. */
+.mic-btn.rec {
+  border-color: var(--red);
+  color: var(--red);
+  font-family: var(--mono);
+  font-size: 12.5px;
+  min-width: 58px;
+  animation: mic-blink 1.5s ease-in-out infinite;
+}
+@keyframes mic-blink { 50% { opacity: .55; } }
 .chat-wrap.drop-ref .composer textarea {
   border-color: var(--green);
   box-shadow: 0 0 0 3px rgba(52, 211, 153, .15);

@@ -273,11 +273,31 @@ mission control, and how its own work fits the whole.
 - Reminder alert one day before the renewal date, through the existing
   notification channels (Telegram/email).
 
-### M16 — Voice prompting
+### M16 — Voice prompting  ✅ shipped 2026-09-04
 - Two transcription backends, picked per use: OpenAI Whisper API (needs a
   key), and Claude Code's own built-in voice/dictation for that adapter.
 - Not specified in the interview, so defaulting to the pattern M6 already
   uses for other input methods: lands in the chat composer as editable text
   for review before send, not an auto-send; dashboard composer only for now,
   no Telegram voice messages.
+- Shipped notes: 🎤 button in the composer opens the per-use picker. Whisper:
+  the browser records via MediaRecorder (auto-stops at 2 minutes) and POSTs
+  base64 audio to `/api/transcribe`, which calls OpenAI's transcription
+  endpoint (Node's global fetch/FormData, no new deps). Built-in dictation:
+  the browser's SpeechRecognition streams final + interim text into the
+  composer live; if the text changes underneath (typed into, or a send
+  cleared it) dictation rebases onto what's there instead of resurrecting
+  what it last wrote. One voice session at a time, held in module state so a
+  chat re-render doesn't kill it; click the button again to finish, Esc to
+  discard. Substitution for "Claude Code's own built-in voice/dictation":
+  claude 2.1.260 exposes no headless voice or transcription surface (checked
+  `--help` and subcommands — hold-to-talk is interactive-TUI only), so the
+  keyless second backend is the browser's built-in dictation, which works for
+  every adapter. Whisper settings (`whisperKey`, `whisperModel` — defaults to
+  `whisper-1`) live under the reserved `_voice` key in `data/settings.json`
+  via `GET/PUT /api/voice`, edited from the picker's settings modal. Verified:
+  23 scratch assertions (stubbed-fetch request shape: auth, blob mime,
+  extension mapping, error mapping; `_voice` round-trip and persistence) plus
+  a scratch instance on port 1970 — routes, guards, and a live OpenAI round
+  trip that reached their API and rejected only the deliberately fake key.
 
