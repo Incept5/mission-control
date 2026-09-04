@@ -1,5 +1,7 @@
-// Register your agents here. Each entry needs a unique `id`, a `type` that
-// matches an adapter in lib/adapters/index.js, and optionally a workspace dir.
+// Seed for fresh installs: each entry is copied into data/agents.json on first
+// boot, after which the dashboard owns the registry ("+ Register agent" / ✎
+// Edit take the same fields). Each entry needs a unique `id` and a `type` that
+// matches an adapter in lib/adapters/index.js.
 //
 // To add a new agent:
 //   1. Write an adapter in lib/adapters/<type>.js (extend BaseAdapter)
@@ -18,7 +20,10 @@
 //          Sonnet/Opus/Haiku list. Values are passed to `claude --model`.
 //   pricing Claude Code prices runs at Anthropic rates whatever the backend, so
 //          tell Mission Control how this provider really bills:
-//            { plan: 'GLM Coding Plan', monthly: 18 }   flat fee → runs cost $0
+//            { plan: 'GLM Coding Plan', amount: 18, currency: 'USD',
+//              period: 'month', renewsOn: '2026-10-01' }   flat fee → runs cost $0
+//              (`monthly: 18` still works as shorthand; the renewal date
+//              drives the day-before reminder and Analytics line item)
 //            { perMillion: { input: 1, output: 3.2, cacheRead: 0.2 } }
 //          Give both and runs still bill $0, but each result also carries
 //          `estimated_cost_usd` — the same tokens at list price — which the

@@ -38,6 +38,10 @@ manager.init();
 // configured hour.
 const DAY_MS = 24 * 3600 * 1000;
 setInterval(() => notifier.maybeDigest(() => manager.digestData(Date.now() - DAY_MS)), 5 * 60 * 1000);
+// Subscription renewals (M15): reminder the day before, date rolls forward
+// once it has passed. Same cadence, plus once at boot.
+setInterval(() => manager.checkRenewals(), 5 * 60 * 1000);
+setTimeout(() => manager.checkRenewals(), 2000);
 
 const wrap = (fn) => (req, res) => {
   try {
@@ -51,7 +55,9 @@ function sendErr(res, err) {
   res.status(err.status || 500).json({ error: err.message });
 }
 
-app.get('/api/agents', wrap((req, res) => res.json(manager.list())));
+// Registered agents (Round 5): definitions the dashboard owns. Seeded from
+// agents.config.js on first boot; edited and removed here from then on.
+app.get('/api/agents', wrap((req, res) => res.json(manager.listAgents())));
 
 app.get('/api/agent-types', wrap((req, res) => res.json(manager.agentTypes())));
 
@@ -59,33 +65,47 @@ app.post('/api/agents', wrap((req, res) => {
   res.json(manager.addAgent(req.body || {}));
 }));
 
+app.put('/api/agents/:id', wrap((req, res) => {
+  res.json(manager.updateAgent(req.params.id, req.body || {}));
+}));
+
 app.delete('/api/agents/:id', wrap((req, res) => {
   manager.removeAgent(req.params.id);
   res.json({ ok: true });
 }));
 
-app.delete('/api/agents/:id/queue/:taskId', wrap((req, res) => {
-  manager.cancelQueued(req.params.id, req.params.taskId);
+app.get('/api/agents/:id/settings', wrap((req, res) => {
+  res.json(manager.getAgentSettings(req.params.id));
+}));
+
+app.put('/api/agents/:id/settings', wrap((req, res) => {
+  res.json(manager.updateAgentSettings(req.params.id, req.body || {}));
+}));
+
+// Launch: a new instance of this agent on a project, optionally with its
+// first prompt already sent.
+app.post('/api/agents/:id/instances', wrap((req, res) => {
+  res.json(manager.launchInstance(req.params.id, req.body || {}));
+}));
+
+// Instances: live sessions of a registered agent on one project. Everything
+// that used to hang off an agent (chat, queue, files, git, settings) hangs
+// off an instance now.
+app.get('/api/instances', wrap((req, res) => res.json(manager.listInstances())));
+
+app.delete('/api/instances/:iid', wrap((req, res) => {
+  manager.closeInstance(req.params.iid);
   res.json({ ok: true });
 }));
 
-app.post('/api/agents/:id/queue/reorder', wrap((req, res) => {
-  manager.reorderQueue(req.params.id, (req.body || {}).order);
+app.delete('/api/instances/:iid/queue/:taskId', wrap((req, res) => {
+  manager.cancelQueued(req.params.iid, req.params.taskId);
   res.json({ ok: true });
 }));
 
-// Fleet launch (M17): start several agents at once, each row claiming an idle
-// agent of its type (repointed as needed) or spawning a new one, so all rows
-// run concurrently in their own workspace/project.
-app.post('/api/fleet/launch', wrap((req, res) => {
-  const body = req.body || {};
-  res.json(manager.launchFleet(Array.isArray(body) ? body : body.rows));
-}));
-
-// Swimlane data for the fleet timeline: past runs overlapping the window plus
-// whatever is in flight right now.
-app.get('/api/fleet/timeline', wrap((req, res) => {
-  res.json(manager.timeline(+req.query.window || 0));
+app.post('/api/instances/:iid/queue/reorder', wrap((req, res) => {
+  manager.reorderQueue(req.params.iid, (req.body || {}).order);
+  res.json({ ok: true });
 }));
 
 // Filesystem browsing for the folder-picker dialog (directories only).
@@ -126,9 +146,9 @@ app.post('/api/fs/mkdir', wrap((req, res) => {
   res.json({ path: target });
 }));
 
-// Chat attachments: saved into the agent's workspace so the CLI can read them.
-app.post('/api/agents/:id/attach', wrap((req, res) => {
-  const entry = manager.get(req.params.id);
+// Chat attachments: saved into the instance's project so the CLI can read them.
+app.post('/api/instances/:iid/attach', wrap((req, res) => {
+  const entry = manager.get(req.params.iid);
   const { name, dataBase64 } = req.body || {};
   if (!name || !dataBase64) throw Object.assign(new Error('Missing name or data'), { status: 400 });
   if (dataBase64.length > 28 * 1024 * 1024) throw Object.assign(new Error('File too large (20MB max)'), { status: 400 });
@@ -271,7 +291,7 @@ app.delete('/api/tasks/:id', wrap((req, res) => {
 }));
 
 app.post('/api/tasks/:id/dispatch', wrap((req, res) => {
-  res.json(manager.dispatchTask(req.params.id, String((req.body || {}).agentId || '')));
+  res.json(manager.dispatchTask(req.params.id, String((req.body || {}).instanceId || '')));
 }));
 
 // Live CLI tabs: Claude Code sessions running anywhere on this machine —
@@ -300,6 +320,16 @@ app.get('/api/projects/:id/claude-sessions/:sid', wrap((req, res) => {
   res.json(claudeStore.readSession(project.path, req.params.sid));
 }));
 
+// Project-owned history (Round 5): every conversation any instance ran
+// against the project, and the raw events behind one of them.
+app.get('/api/projects/:id/conversations', wrap((req, res) => {
+  res.json(manager.conversations(req.params.id));
+}));
+
+app.get('/api/projects/:id/history', wrap((req, res) => {
+  res.json(manager.projectHistory(req.params.id, { cid: req.query.cid ? String(req.query.cid) : null }));
+}));
+
 app.get('/api/projects', wrap((req, res) => res.json(manager.listProjects())));
 
 app.post('/api/projects', wrap((req, res) => {
@@ -315,86 +345,81 @@ app.delete('/api/projects/:id', wrap((req, res) => {
   res.json({ ok: true });
 }));
 
-app.post('/api/agents/:id/project', wrap((req, res) => {
-  manager.setAgentProject(req.params.id, req.body.projectId || null);
+app.get('/api/instances/:iid/history', wrap((req, res) => {
+  res.json(manager.instanceHistory(req.params.iid));
+}));
+
+app.get('/api/instances/:iid/skills', wrap((req, res) => {
+  res.json(manager.listSkills(req.params.iid));
+}));
+
+app.post('/api/instances/:iid/chat', wrap((req, res) => {
+  res.json(manager.sendChat(req.params.iid, String(req.body.message || '').trim()));
+}));
+
+app.post('/api/instances/:iid/stop', wrap((req, res) => {
+  manager.stop(req.params.iid);
   res.json({ ok: true });
 }));
 
-app.get('/api/agents/:id/history', wrap((req, res) => {
-  res.json(manager.get(req.params.id).history);
-}));
-
-app.get('/api/agents/:id/skills', wrap((req, res) => {
-  res.json(manager.listSkills(req.params.id));
-}));
-
-app.post('/api/agents/:id/chat', wrap((req, res) => {
-  res.json(manager.sendChat(req.params.id, String(req.body.message || '').trim()));
-}));
-
-app.post('/api/agents/:id/stop', wrap((req, res) => {
-  manager.stop(req.params.id);
+app.post('/api/instances/:iid/session/clear', wrap((req, res) => {
+  manager.clearSession(req.params.iid);
   res.json({ ok: true });
 }));
 
-app.post('/api/agents/:id/session/clear', wrap((req, res) => {
-  manager.clearSession(req.params.id);
+app.post('/api/instances/:iid/history/clear', wrap((req, res) => {
+  manager.clearHistory(req.params.iid);
   res.json({ ok: true });
 }));
 
-app.post('/api/agents/:id/history/clear', wrap((req, res) => {
-  manager.clearHistory(req.params.id);
-  res.json({ ok: true });
+app.get('/api/instances/:iid/settings', wrap((req, res) => {
+  res.json(manager.getSettings(req.params.iid));
 }));
 
-app.get('/api/agents/:id/settings', wrap((req, res) => {
-  res.json(manager.getSettings(req.params.id));
+app.put('/api/instances/:iid/settings', wrap((req, res) => {
+  res.json(manager.updateSettings(req.params.iid, req.body || {}));
 }));
 
-app.put('/api/agents/:id/settings', wrap((req, res) => {
-  res.json(manager.updateSettings(req.params.id, req.body || {}));
-}));
-
-app.get('/api/agents/:id/files', wrap((req, res) => {
-  const entry = manager.get(req.params.id);
+app.get('/api/instances/:iid/files', wrap((req, res) => {
+  const entry = manager.get(req.params.iid);
   res.json(files.listDir(manager.getWorkspaceDir(entry), String(req.query.path || '')));
 }));
 
-app.get('/api/agents/:id/file', wrap((req, res) => {
-  const entry = manager.get(req.params.id);
+app.get('/api/instances/:iid/file', wrap((req, res) => {
+  const entry = manager.get(req.params.iid);
   res.json(files.readFileSafe(manager.getWorkspaceDir(entry), String(req.query.path || '')));
 }));
 
-app.put('/api/agents/:id/file', wrap((req, res) => {
-  const entry = manager.get(req.params.id);
+app.put('/api/instances/:iid/file', wrap((req, res) => {
+  const entry = manager.get(req.params.iid);
   const { path: rel, content } = req.body || {};
   if (!rel) throw Object.assign(new Error('Missing path'), { status: 400 });
   res.json(files.writeFileSafe(manager.getWorkspaceDir(entry), String(rel), String(content ?? '')));
 }));
 
-// Git operations run against the agent's current workspace (project root when
-// one is selected).
+// Git operations run against the instance's project root.
 const gitWrap = (fn) => wrap(async (req, res) => {
-  const entry = manager.get(req.params.id);
+  const entry = manager.get(req.params.iid);
   const cwd = manager.getWorkspaceDir(entry);
   res.json(await fn(cwd, req));
 });
 
-app.get('/api/agents/:id/git/status', gitWrap((cwd) => git.status(cwd)));
-app.get('/api/agents/:id/git/diff', gitWrap((cwd, req) => git.diff(cwd, req.query.path ? String(req.query.path) : null)));
-app.get('/api/agents/:id/git/log', gitWrap((cwd, req) => git.log(cwd, Math.min(+req.query.limit || 20, 100))));
-app.get('/api/agents/:id/git/show', gitWrap((cwd, req) => git.show(cwd, String(req.query.hash || ''))));
-app.get('/api/agents/:id/git/branches', gitWrap((cwd) => git.branches(cwd)));
-app.post('/api/agents/:id/git/commit', gitWrap((cwd, req) => git.commit(cwd, (req.body || {}).message)));
-app.post('/api/agents/:id/git/branch', gitWrap((cwd, req) => git.createBranch(cwd, String((req.body || {}).name || ''))));
-app.post('/api/agents/:id/git/checkout', gitWrap((cwd, req) => git.checkout(cwd, String((req.body || {}).name || ''))));
-app.post('/api/agents/:id/git/discard', gitWrap((cwd, req) => git.discard(cwd, String((req.body || {}).path || ''))));
-app.post('/api/agents/:id/git/init', gitWrap((cwd) => git.init(cwd)));
+app.get('/api/instances/:iid/git/status', gitWrap((cwd) => git.status(cwd)));
+app.get('/api/instances/:iid/git/diff', gitWrap((cwd, req) => git.diff(cwd, req.query.path ? String(req.query.path) : null)));
+app.get('/api/instances/:iid/git/log', gitWrap((cwd, req) => git.log(cwd, Math.min(+req.query.limit || 20, 100))));
+app.get('/api/instances/:iid/git/show', gitWrap((cwd, req) => git.show(cwd, String(req.query.hash || ''))));
+app.get('/api/instances/:iid/git/branches', gitWrap((cwd) => git.branches(cwd)));
+app.post('/api/instances/:iid/git/commit', gitWrap((cwd, req) => git.commit(cwd, (req.body || {}).message)));
+app.post('/api/instances/:iid/git/branch', gitWrap((cwd, req) => git.createBranch(cwd, String((req.body || {}).name || ''))));
+app.post('/api/instances/:iid/git/checkout', gitWrap((cwd, req) => git.checkout(cwd, String((req.body || {}).name || ''))));
+app.post('/api/instances/:iid/git/discard', gitWrap((cwd, req) => git.discard(cwd, String((req.body || {}).path || ''))));
+app.post('/api/instances/:iid/git/init', gitWrap((cwd) => git.init(cwd)));
 
 wss.on('connection', (socket) => {
   socket.send(JSON.stringify({
     type: 'hello',
-    agents: manager.list(),
+    agents: manager.listAgents(),
+    instances: manager.listInstances(),
     projects: manager.listProjects(),
     tasks: manager.listTasks(),
   }));

@@ -1,28 +1,32 @@
 /* Mission Control — frontend */
 'use strict';
 
+// Two kinds of thing (Round 5): registered agents are definitions (type, models,
+// pricing, env) and never chat; instances are live sessions of one agent on
+// one project. Every per-session map below is keyed by instance id.
 const state = {
-  agents: [],            // [{id, name, description, accent, status}]
-  projects: [],          // [{id, name, path, description, agents}]
+  agents: [],            // registered agents [{id, name, type, description, accent, available, instances:[iid]}]
+  instances: [],         // [{id, name, agentId, agent, accent, projectId, status}]
+  projects: [],          // [{id, name, path, description, instances, agents}]
   tasks: [],             // kanban cards
   boardProj: undefined,  // selected board project id (null = default workspace)
-  histories: {},         // agentId -> [events]
-  tab: 'chat',           // active tab on agent pages
-  wsFile: {},            // agentId -> { dir, selected, dirty }
-  fileTree: {},          // agentId -> { expanded:Set, root, selected } (file trees)
-  attach: {},            // agentId -> staged uploads / file references for the next message
-  drafts: {},            // agentId -> unsent composer text, survives agent switches
-  skillsCache: {},       // agentId -> { at, items } for the composer's `/` picker
-  sessionSel: {},        // agentId -> selected session cid
-  agentProj: {},         // agentId -> last seen project id (change detection)
-  agentCid: {},          // agentId -> last seen conversation id
+  histories: {},         // iid -> [events] (this instance's slice of the project history)
+  tab: 'chat',           // active tab on instance pages
+  wsFile: {},            // iid -> { dir, selected, dirty }
+  fileTree: {},          // iid -> { expanded:Set, root, selected } (file trees)
+  attach: {},            // iid -> staged uploads / file references for the next message
+  drafts: {},            // iid -> unsent composer text, survives instance switches
+  skillsCache: {},       // iid -> { at, items } for the composer's `/` picker
+  sessionSel: {},        // iid -> selected session cid
+  agentCid: {},          // iid -> last seen conversation id (change detection)
   projEdit: null,        // project id currently being edited on Projects page
   voice: null,           // active voice session (M16): recorder or dictation, one at a time
   voiceCfg: null,        // { at, whisperKey } cache for the 🎤 picker
   vault: null,           // Vault page: { sel, editing, draft, q, flaggedOnly, expanded:Set }
   cliSessions: [],       // live external CLI sessions (from /api/cli-sessions)
   cliFetchedAt: 0,
-  fleet: null,           // Fleet page (M17): { rows, windowMs, types, data, sel }
+  agentLaunch: null,     // Sidebar launcher: { agentId (open under this agent, or null), projectId, prompt }
+  collapsed: new Set(),  // registered agents whose instance list is folded in the sidebar
   connected: false,
 };
 
@@ -106,6 +110,14 @@ function getAgent(id) {
   return state.agents.find((a) => a.id === id);
 }
 
+function getInstance(iid) {
+  return state.instances.find((i) => i.id === iid);
+}
+
+function instancesOf(agentId) {
+  return state.instances.filter((i) => i.agentId === agentId);
+}
+
 function modelLabel(status) {
   return status?.model || 'default model';
 }
@@ -145,6 +157,7 @@ function updateConnBadge() {
 function handleServerMsg(msg) {
   if (msg.type === 'hello') {
     state.agents = msg.agents;
+    state.instances = msg.instances || [];
     if (msg.projects) state.projects = msg.projects;
     if (msg.tasks) state.tasks = msg.tasks;
     renderSidebar();
@@ -161,51 +174,65 @@ function handleServerMsg(msg) {
     renderSidebar();
     const cur = currentAgentId();
     if (cur && !getAgent(cur)) { location.hash = '#/'; return; }
-    if (!cur && !onOtherPage()) renderHome();
+    if (cur) renderAgentDetail(getAgent(cur));
+    else if (!currentInstanceId() && !onOtherPage()) renderHome();
+    return;
+  }
+  if (msg.type === 'instances') {
+    // Statuses arrive on their own channel; keep whatever is newer than the
+    // list snapshot so a status that raced the broadcast isn't lost.
+    const prev = new Map(state.instances.map((i) => [i.id, i.status]));
+    state.instances = msg.instances.map((i) => ({ ...i, status: i.status || prev.get(i.id) }));
+    renderSidebar();
+    const cur = currentInstanceId();
+    if (cur && !getInstance(cur)) { location.hash = '#/'; return; }
+    if (currentAgentId()) renderAgentDetail(getAgent(currentAgentId()));
+    else if (onBoardPage()) renderBoard();
+    else if (!cur && !onOtherPage()) renderHome();
     return;
   }
   if (msg.type === 'projects') {
     state.projects = msg.projects;
     if (onProjectsPage()) renderProjects();
-    else if (!currentAgentId()) { if (!onOtherPage()) renderHome(); }
-    else {
-      const agent = getAgent(currentAgentId());
-      if (agent) populateProjectSelect(agent);
-    }
+    else if (!currentInstanceId() && !currentAgentId() && !onOtherPage()) renderHome();
+    populateLauncherProjects();
     return;
   }
-  if (msg.type === 'agent_partial') {
-    if (currentAgentId() === msg.agentId && state.tab === 'chat') updatePartialBubble(msg.text);
+  if (msg.type === 'instance_partial') {
+    if (currentInstanceId() === msg.iid && state.tab === 'chat') updatePartialBubble(msg.text);
     return;
   }
-  if (msg.type === 'agent_status') {
-    const agent = getAgent(msg.agentId);
-    if (agent) agent.status = msg.status;
+  if (msg.type === 'instance_status') {
+    const inst = getInstance(msg.iid);
+    if (inst) inst.status = msg.status;
     renderSidebar();
-    onStatusChanged(msg.agentId);
+    onStatusChanged(msg.iid);
     return;
   }
-  if (msg.type === 'agent_event') {
-    (state.histories[msg.agentId] ||= []).push(msg.event);
+  if (msg.type === 'instance_event') {
+    (state.histories[msg.iid] ||= []).push(msg.event);
     if (onAnalyticsPage()) {
       clearTimeout(state.anTimer);
       state.anTimer = setTimeout(renderAnalytics, 700);
       return;
     }
-    if (onFleetPage()) {
-      scheduleFleetRefresh();
-      return;
-    }
-    onAgentEvent(msg.agentId, msg.event);
+    onAgentEvent(msg.iid, msg.event);
     return;
   }
   if (msg.type === 'history_cleared') {
-    state.histories[msg.agentId] = [];
-    if (currentAgentId() === msg.agentId) route();
+    state.histories[msg.iid] = [];
+    if (currentInstanceId() === msg.iid) route();
   }
 }
 
 /* ── Routing ─────────────────────────────────────────────────────── */
+
+// `#/instance/<iid>` is the Control Room for one live session;
+// `#/agent/<id>` is a registered agent's definition page.
+function currentInstanceId() {
+  const m = location.hash.match(/^#\/instance\/([^/]+)/);
+  return m ? decodeURIComponent(m[1]) : null;
+}
 
 function currentAgentId() {
   const m = location.hash.match(/^#\/agent\/([^/]+)/);
@@ -216,8 +243,15 @@ function onProjectsPage() {
   return location.hash.startsWith('#/projects');
 }
 
+// `#/project/<id>` — the project's conversations; `#/project/<id>/<cid>`
+// opens one of them.
 function currentProjectHistoryId() {
   const m = location.hash.match(/^#\/project\/([^/]+)/);
+  return m ? decodeURIComponent(m[1]) : null;
+}
+
+function currentProjectCid() {
+  const m = location.hash.match(/^#\/project\/[^/]+\/([^/]+)/);
   return m ? decodeURIComponent(m[1]) : null;
 }
 
@@ -237,19 +271,15 @@ function onAnalyticsPage() {
   return location.hash.startsWith('#/analytics');
 }
 
-function onFleetPage() {
-  return location.hash.startsWith('#/fleet');
-}
-
 // True on any route that isn't the agent view or the home dashboard, so
 // background broadcasts (agent/project list updates) don't yank the user
 // back to the dashboard while they're looking at one of these pages.
 function onOtherPage() {
-  return onProjectsPage() || onBoardPage() || onAlertsPage() || onAnalyticsPage() || onVaultPage() || onFleetPage() || !!currentProjectHistoryId();
+  return onProjectsPage() || onBoardPage() || onAlertsPage() || onAnalyticsPage() || onVaultPage() || !!currentProjectHistoryId() || !!currentAgentId();
 }
 
 async function route() {
-  const id = currentAgentId();
+  const iid = currentInstanceId();
   renderSidebar();
   if (onProjectsPage()) return renderProjects();
   if (currentProjectHistoryId()) return renderProjectHistory(currentProjectHistoryId());
@@ -257,136 +287,543 @@ async function route() {
   if (onAlertsPage()) return renderAlerts();
   if (onAnalyticsPage()) return renderAnalytics();
   if (onVaultPage()) return renderVault();
-  if (onFleetPage()) return renderFleet();
-  if (!id) return renderHome();
-  const agent = getAgent(id);
-  if (!agent) return renderHome();
-  if (!state.histories[id]) {
-    try { state.histories[id] = await api(`/api/agents/${id}/history`); }
-    catch { state.histories[id] = []; }
+  if (currentAgentId()) {
+    const agent = getAgent(currentAgentId());
+    return agent ? renderAgentDetail(agent) : renderHome();
   }
-  renderAgentPage(agent);
+  if (!iid) return renderHome();
+  const inst = getInstance(iid);
+  if (!inst) return renderHome();
+  if (!state.histories[iid]) {
+    try { state.histories[iid] = await api(`/api/instances/${iid}/history`); }
+    catch { state.histories[iid] = []; }
+  }
+  renderAgentPage(inst);
 }
 
 window.addEventListener('hashchange', route);
 
 /* ── Sidebar ─────────────────────────────────────────────────────── */
 
+// Agents section: one row per registered agent, its instances nested beneath
+// (status dot, project, queue badge, close ✕ when idle), a ▶ per agent that
+// expands the launcher in place, and "+ Register agent" at the bottom.
 function renderSidebar() {
-  const id = currentAgentId();
-  $('.nav-item[data-route="home"]').classList.toggle('active', !id && !onProjectsPage() && !onBoardPage() && !onAlertsPage() && !onAnalyticsPage() && !onVaultPage() && !onFleetPage());
-  $('.nav-item[data-route="fleet"]').classList.toggle('active', onFleetPage());
+  const iid = currentInstanceId();
+  const aid = currentAgentId();
+  $('.nav-item[data-route="home"]').classList.toggle('active', !iid && !aid && !onOtherPage());
   $('.nav-item[data-route="projects"]').classList.toggle('active', onProjectsPage() || !!currentProjectHistoryId());
   $('.nav-item[data-route="board"]').classList.toggle('active', onBoardPage());
   $('.nav-item[data-route="alerts"]').classList.toggle('active', onAlertsPage());
   $('.nav-item[data-route="analytics"]').classList.toggle('active', onAnalyticsPage());
   $('.nav-item[data-route="vault"]').classList.toggle('active', onVaultPage());
   const nav = $('#agent-nav');
+  const f = agentLaunchState();
+  // Rebuilding the list would yank focus out of the launcher / register form
+  // mid-keystroke (status broadcasts arrive constantly during a run), so
+  // while a field in the sidebar is focused the re-render waits for blur.
+  const focused = document.activeElement;
+  if (focused && nav.contains(focused) && /^(INPUT|TEXTAREA|SELECT)$/.test(focused.tagName)) {
+    if (!state.navDeferred) {
+      state.navDeferred = true;
+      focused.addEventListener('blur', () => { state.navDeferred = false; renderSidebar(); }, { once: true });
+    }
+    return;
+  }
   nav.replaceChildren(
-    ...state.agents.map((a) =>
-      el('a', {
-        class: 'nav-item' + (a.id === id ? ' active' : ''),
-        href: `#/agent/${encodeURIComponent(a.id)}`,
-      },
-        el('span', { class: `dot ${a.status?.state || 'offline'}` }),
-        el('span', { class: 'nav-agent-col' },
-          el('span', { class: 'nav-agent-name' }, a.name),
-          el('span', { class: 'nav-agent-model' }, modelLabel(a.status)),
+    ...state.agents.map((a) => {
+      const kids = instancesOf(a.id);
+      const folded = state.collapsed.has(a.id);
+      const working = kids.filter((i) => i.status?.state === 'working').length;
+      return el('div', { class: 'nav-agent' + (a.available ? '' : ' unavailable') },
+        el('div', { class: 'nav-item nav-agent-row' + (a.id === aid ? ' active' : '') },
+          el('button', {
+            class: 'nav-fold', title: folded ? 'Show instances' : 'Hide instances',
+            onclick: () => {
+              if (folded) state.collapsed.delete(a.id); else state.collapsed.add(a.id);
+              renderSidebar();
+            },
+          }, kids.length ? (folded ? '▸' : '▾') : '·'),
+          el('a', {
+            class: 'nav-agent-link', href: `#/agent/${encodeURIComponent(a.id)}`,
+            style: `--agent-accent:${a.accent || 'var(--accent)'}`,
+            title: a.available ? a.description || a.name : `${a.name} — CLI not available`,
+          },
+            el('span', { class: 'nav-agent-swatch' }),
+            el('span', { class: 'nav-agent-name' }, a.name),
+          ),
+          kids.length ? el('span', {
+            class: 'nav-count' + (working ? ' working' : ''),
+            title: `${kids.length} instance${kids.length === 1 ? '' : 's'}${working ? `, ${working} working` : ''}`,
+          }, working ? `${working}/${kids.length}` : String(kids.length)) : null,
+          el('button', {
+            class: 'nav-launch-btn' + (f.agentId === a.id ? ' active' : ''),
+            title: `Launch a ${a.name} instance`,
+            onclick: () => (f.agentId === a.id ? closeLauncher() : openAgentLauncher(a.id)),
+          }, f.agentId === a.id ? '−' : '▶'),
         ),
-        a.status?.queue?.length
-          ? el('span', { class: 'nav-queue-badge', title: 'queued tasks' }, String(a.status.queue.length))
-          : null,
-      )
-    )
+        f.agentId === a.id ? agentLauncher() : null,
+        folded ? null : kids.map((i) => instanceNavRow(i, i.id === iid)),
+      );
+    }),
+    registerNode(),
   );
-  nav.append(
-    el('button', { class: 'nav-item nav-add', onclick: openNewAgentModal },
-      el('span', { class: 'nav-icon' }, '+'), 'New agent')
+  if (!state.agents.length) {
+    nav.prepend(el('div', { class: 'nav-empty' }, 'No agents registered yet.'));
+  }
+}
+
+function instanceNavRow(i, active) {
+  const st = i.status || {};
+  const busy = st.state === 'working';
+  return el('a', {
+    class: 'nav-item nav-instance' + (active ? ' active' : ''),
+    href: `#/instance/${encodeURIComponent(i.id)}`,
+    title: `${i.name} · ${modelLabel(st)}`,
+  },
+    el('span', { class: `dot ${st.state || 'offline'}` }),
+    el('span', { class: 'nav-agent-col' },
+      el('span', { class: 'nav-agent-name' }, projName(i.projectId)),
+      el('span', { class: 'nav-agent-model' }, busy ? (st.currentTask || 'working…') : modelLabel(st)),
+    ),
+    st.queue?.length
+      ? el('span', { class: 'nav-queue-badge', title: 'queued tasks' }, String(st.queue.length))
+      : null,
+    el('button', {
+      class: 'nav-close', disabled: busy ? '' : null,
+      title: busy ? 'Working — abort or wait before closing' : 'Close this instance (its conversation stays in the project history)',
+      onclick: (e) => { e.preventDefault(); e.stopPropagation(); closeInstance(i); },
+    }, '✕'),
   );
 }
 
-/* ── New agent modal ─────────────────────────────────────────────── */
-
-async function openNewAgentModal() {
-  let types = [];
+async function closeInstance(i) {
   try {
-    types = await api('/api/agent-types');
-  } catch (err) {
-    toast(err.message, true);
-    return;
+    await api('/api/instances/' + encodeURIComponent(i.id), { method: 'DELETE' });
+    toast(`Closed ${i.name}`);
+    if (currentInstanceId() === i.id) location.hash = '#/';
+  } catch (err) { toast(err.message, true); }
+}
+
+/* ── Instance launcher (sidebar, per registered agent) ───────────── */
+
+// ▶ on an agent row expands this form beneath it: project (required) and an
+// optional first prompt. Form values live in state so sidebar re-renders
+// (status broadcasts) never eat what's being typed; the node itself is
+// persistent and re-parented rather than rebuilt.
+function agentLaunchState() {
+  if (!state.agentLaunch) {
+    state.agentLaunch = { agentId: null, projectId: '', prompt: '' };
   }
-  const nameIn = el('input', { placeholder: 'e.g. Claude Code — API work' });
-  const typeSel = el('select', {}, types.map((t) => el('option', { value: t.type }, t.label)));
-  const descIn = el('input', { placeholder: 'Description (optional)' });
+  return state.agentLaunch;
+}
+
+let launcherNode = null;
+
+function agentLauncher() {
+  const f = agentLaunchState();
+  if (launcherNode) { populateLauncherProjects(); return launcherNode; }
+
+  const projSel = el('select', { class: 'hdr-model', id: 'launcher-proj', title: 'Project this instance works in' });
+  const promptIn = el('textarea', {
+    class: 'launcher-input launcher-prompt', id: 'launcher-prompt',
+    placeholder: 'First prompt (optional) — sent the moment the instance starts',
+    rows: '3',
+    oninput: (e) => { f.prompt = e.target.value; },
+    onkeydown: (e) => {
+      if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) launchNewInstance();
+      if (e.key === 'Escape') closeLauncher();
+    },
+  });
+
+  launcherNode = el('div', { class: 'nav-launch-form', id: 'nav-launch-form' },
+    projSel,
+    promptIn,
+    el('div', { class: 'nav-launch-foot' },
+      el('span', { class: 'nav-launch-hint' }, '⌘↵ to launch'),
+      el('button', { class: 'btn primary sm', onclick: launchNewInstance }, 'Launch'),
+    ),
+  );
+  populateLauncherProjects();
+  return launcherNode;
+}
+
+function populateLauncherProjects() {
+  const f = agentLaunchState();
+  const sel = $('#launcher-proj');
+  if (!sel) return;
+  if (!state.projects.some((p) => p.id === f.projectId)) f.projectId = state.projects[0]?.id || '';
+  sel.replaceChildren(
+    ...(state.projects.length
+      ? state.projects.map((p) => el('option', { value: p.id }, '▣ ' + p.name))
+      : [el('option', { value: '' }, 'No projects registered')]),
+  );
+  sel.value = f.projectId;
+  sel.onchange = () => { f.projectId = sel.value; };
+}
+
+function openAgentLauncher(agentId) {
+  const f = agentLaunchState();
+  f.agentId = agentId || state.agents[0]?.id || null;
+  if (!f.agentId) return toast('Register an agent first', true);
+  state.collapsed.delete(f.agentId);
+  renderSidebar();
+  $('#nav-launch-form')?.scrollIntoView({ block: 'nearest' });
+  $('#launcher-prompt')?.focus();
+}
+
+function closeLauncher() {
+  const f = agentLaunchState();
+  f.agentId = null;
+  renderSidebar();
+}
+
+// Launch an instance of the open agent on the chosen project, send the first
+// prompt, and land on its Control Room with the run already streaming.
+async function launchNewInstance() {
+  const f = agentLaunchState();
+  const agent = getAgent(f.agentId);
+  if (!agent) return closeLauncher();
+  if (!f.projectId) return toast('Pick a project — every instance works in one', true);
+  const prompt = f.prompt.trim();
+  let inst;
+  try {
+    inst = await api(`/api/agents/${encodeURIComponent(agent.id)}/instances`, {
+      method: 'POST',
+      body: { projectId: f.projectId, prompt },
+    });
+  } catch (err) {
+    return toast(err.message, true);
+  }
+  toast(prompt ? `${inst.name} is running` : `${inst.name} is ready`);
+  // Keep the project for the next launch; the prompt resets.
+  f.prompt = '';
+  const promptNode = $('#launcher-prompt');
+  if (promptNode) { promptNode.value = ''; promptNode.style.height = 'auto'; }
+  f.agentId = null;
+  if (!getInstance(inst.id)) state.instances.push(inst);   // the broadcast may still be in flight
+  location.hash = '#/instance/' + encodeURIComponent(inst.id);
+}
+
+/* ── Register agent (sidebar) ────────────────────────────────────── */
+
+// "+ Register agent" opens the full definition form (M21) as a modal, so
+// sidebar re-renders from status broadcasts never touch what's being typed.
+let registerNodeEl = null;
+
+function registerNode() {
+  if (registerNodeEl) return registerNodeEl;
+  registerNodeEl = el('div', { class: 'nav-launch' },
+    el('button', { class: 'nav-item nav-add', onclick: () => openAgentForm(null) },
+      el('span', { class: 'nav-icon' }, '+'), 'Register agent'),
+  );
+  return registerNodeEl;
+}
+
+/* ── Agent definition form (register + edit, M21) ───────────────── */
+
+const ACCENT_PRESETS = ['#d97757', '#5eb0ff', '#34d399', '#fbbf24', '#c084fc', '#f472b6'];
+const CURRENCY_SIGNS = { USD: '$', GBP: '£', EUR: '€' };
+const RATE_KEYS = ['input', 'output', 'cacheRead', 'cacheWrite'];
+
+function fmtMoney(amount, currency = 'USD') {
+  const n = Number(amount) % 1 ? Number(amount).toFixed(2) : String(amount);
+  const sign = CURRENCY_SIGNS[currency];
+  return sign ? sign + n : `${n} ${currency}`;
+}
+
+function isRateCard(p) {
+  return !!p && typeof p === 'object' && RATE_KEYS.some((k) => k in p);
+}
+
+// One line for the agent page and cards: plan · price / period · rate card.
+function pricingSummary(p) {
+  if (!p) return 'provider list price (as reported by the CLI)';
+  const bits = [];
+  if (p.plan) {
+    bits.push(p.plan + (typeof p.amount === 'number' ? ` · ${fmtMoney(p.amount, p.currency)}/${p.period === 'year' ? 'yr' : 'mo'}` : ''));
+  }
+  if (p.perMillion) bits.push(p.plan ? 'rate card for list-price estimates' : 'metered at the rate card');
+  return bits.join(' · ');
+}
+
+function renewalText(p) {
+  if (!p?.renewsOn) return null;
+  const days = Math.round((Date.parse(p.renewsOn) - Date.parse(new Date().toISOString().slice(0, 10))) / 864e5);
+  const rel = days < 0 ? `${-days}d overdue` : days === 0 ? 'today' : days === 1 ? 'tomorrow' : `in ${days} days`;
+  return { text: `${p.renewsOn} · ${rel}`, days };
+}
+
+let agentTypesCache = null;
+async function agentTypes() {
+  if (!agentTypesCache) {
+    try { agentTypesCache = await api('/api/agent-types'); } catch { agentTypesCache = []; }
+  }
+  return agentTypesCache.length ? agentTypesCache : [{ type: 'claude-code', label: 'claude-code' }];
+}
+
+// A list of identical rows (models, rate cards, env) with ✕ per row and an
+// add button. `columns` describe the inputs; `read()` returns one object per
+// row plus any `extra` the row was created with (used for masked secrets).
+function rowList({ columns, rows, addLabel, blank }) {
+  const list = el('div', { class: 'row-list' });
+  const addRow = (values = {}, extra = {}) => {
+    const row = el('div', { class: 'row-list-row' });
+    row._extra = extra;
+    row._inputs = {};
+    for (const c of columns) {
+      let input;
+      if (c.type === 'select') {
+        input = el('select', { class: 'row-in', style: c.width ? `flex:0 0 ${c.width}` : null },
+          c.options.map(([v, l]) => el('option', { value: v, selected: (values[c.key] ?? c.options[0][0]) === v ? '' : null }, l)));
+      } else {
+        input = el('input', {
+          class: 'row-in', type: c.type || 'text', placeholder: c.placeholder || '',
+          step: c.type === 'number' ? 'any' : null, min: c.type === 'number' ? '0' : null,
+          style: c.width ? `flex:0 0 ${c.width}` : null,
+          title: c.title || null,
+        });
+        input.value = values[c.key] ?? '';
+      }
+      if (c.onchange) input.addEventListener('change', () => c.onchange(row));
+      row._inputs[c.key] = input;
+      row.append(input);
+    }
+    row.append(el('button', { class: 'btn sm ghost', title: 'Remove', onclick: () => row.remove() }, '✕'));
+    list.append(row);
+    if (blank) blank(row);
+    return row;
+  };
+  for (const r of rows) addRow(r.values || r, r.extra || {});
+  const node = el('div', {},
+    el('div', { class: 'row-list-head' }, columns.map((c) => el('span', { style: c.width ? `flex:0 0 ${c.width}` : null }, c.label))),
+    list,
+    el('button', { class: 'btn sm', style: 'margin-top:6px', onclick: () => { const r = addRow(); r._inputs[columns[0].key].focus(); } }, '+ ' + addLabel),
+  );
+  const read = () => [...list.children].map((row) => {
+    const out = { ...row._extra };
+    for (const c of columns) out[c.key] = row._inputs[c.key].value.trim();
+    return out;
+  });
+  return { node, read };
+}
+
+// Register (agent = null) or edit (agent = registered agent). Everything the
+// registry holds is here: identity, models, billing, env. Saved with the
+// existing POST / PUT; the server normalises pricing and keeps masked
+// secrets, so this only has to assemble the shape.
+async function openAgentForm(agent) {
+  const types = await agentTypes();
+  const editing = !!agent;
+  const p = agent?.pricing || {};
+  const liveCount = editing ? instancesOf(agent.id).length : 0;
+
+  // Identity
+  const nameIn = el('input', { placeholder: 'e.g. GLM 5.3' });
+  nameIn.value = agent?.name || '';
+  const typeSel = el('select', { disabled: liveCount ? '' : null, title: liveCount ? 'Close its instances before changing the type' : null },
+    types.map((t) => el('option', { value: t.type, selected: (agent?.type || types[0].type) === t.type ? '' : null }, t.label)));
+  const descIn = el('input', { placeholder: 'What this agent is for' });
+  descIn.value = agent?.description || '';
+  const accentIn = el('input', { type: 'color', class: 'accent-in' });
+  accentIn.value = agent?.accent || ACCENT_PRESETS[state.agents.length % ACCENT_PRESETS.length];
+  const swatches = el('div', { class: 'accent-swatches' },
+    ACCENT_PRESETS.map((c) => el('button', {
+      class: 'accent-swatch', style: `--agent-accent:${c}`, title: c, type: 'button',
+      onclick: () => { accentIn.value = c; },
+    })));
+
+  // Models
+  const models = rowList({
+    columns: [
+      { key: 'value', label: 'Value (passed to --model)', placeholder: 'glm-5.3' },
+      { key: 'label', label: 'Label', placeholder: 'GLM 5.3' },
+    ],
+    rows: agent?.models || [],
+    addLabel: 'Add model',
+  });
+
+  // Billing — subscription
+  const planIn = el('input', { placeholder: 'e.g. Max plan, GLM Coding Plan' });
+  planIn.value = p.plan || '';
+  const amountIn = el('input', { type: 'number', step: 'any', min: '0', placeholder: '0' });
+  amountIn.value = typeof p.amount === 'number' ? String(p.amount) : '';
+  const currencyIn = el('input', { list: 'currency-list', maxlength: '3', placeholder: 'USD', class: 'currency-in' });
+  currencyIn.value = p.currency || (typeof p.amount === 'number' ? 'USD' : '');
+  const currencyList = el('datalist', { id: 'currency-list' }, ['USD', 'GBP', 'EUR'].map((c) => el('option', { value: c })));
+  const periodSel = el('select', {},
+    el('option', { value: 'month', selected: p.period !== 'year' ? '' : null }, 'per month'),
+    el('option', { value: 'year', selected: p.period === 'year' ? '' : null }, 'per year'));
+  const renewsIn = el('input', { type: 'date' });
+  renewsIn.value = p.renewsOn || '';
+
+  // Billing — rate card. A flat card is one row with a blank model; a map is
+  // one row per model with 'default' shown as blank.
+  const cardRows = [];
+  if (isRateCard(p.perMillion)) cardRows.push({ model: '', ...p.perMillion });
+  else if (p.perMillion) for (const [m, c] of Object.entries(p.perMillion)) cardRows.push({ model: m === 'default' ? '' : m, ...c });
+  const rates = rowList({
+    columns: [
+      { key: 'model', label: 'Model (blank = default)', placeholder: 'default' },
+      { key: 'input', label: 'Input', type: 'number', width: '80px' },
+      { key: 'output', label: 'Output', type: 'number', width: '80px' },
+      { key: 'cacheRead', label: 'Cache read', type: 'number', width: '80px' },
+      { key: 'cacheWrite', label: 'Cache write', type: 'number', width: '80px' },
+    ],
+    rows: cardRows,
+    addLabel: 'Add rate card',
+  });
+
+  // Env — value or file path per key; a masked secret keeps its stored value
+  // unless something new is typed.
+  const envRows = Object.entries(agent?.env || {}).map(([key, v]) => {
+    if (v && typeof v === 'object' && v.file) return { values: { key, mode: 'file', value: v.file } };
+    if (v && typeof v === 'object' && v.secret) return { values: { key, mode: 'value', value: '' }, extra: { secret: true } };
+    return { values: { key, mode: 'value', value: String(v) } };
+  });
+  const env = rowList({
+    columns: [
+      { key: 'key', label: 'Variable', placeholder: 'ANTHROPIC_BASE_URL' },
+      { key: 'mode', label: 'Kind', type: 'select', width: '90px', options: [['value', 'Value'], ['file', 'File']] },
+      { key: 'value', label: 'Value or file path', placeholder: 'https://… or ~/.config/provider/token' },
+    ],
+    rows: envRows,
+    addLabel: 'Add variable',
+    blank: (row) => {
+      if (row._extra.secret) {
+        row._inputs.value.placeholder = '•••••• stored — leave blank to keep';
+        row._inputs.value.title = 'The stored value is not shown; type to replace it';
+      }
+    },
+  });
+
+  function readBody() {
+    const perMillion = {};
+    for (const r of rates.read()) {
+      const card = {};
+      for (const k of RATE_KEYS) if (r[k] !== '') card[k] = Number(r[k]);
+      if (Object.keys(card).length) perMillion[r.model || 'default'] = card;
+    }
+    const envOut = {};
+    for (const r of env.read()) {
+      if (!r.key) continue;
+      if (r.mode === 'file') envOut[r.key] = { file: r.value };
+      else if (r.value) envOut[r.key] = r.value;
+      else if (r.secret) envOut[r.key] = { secret: true };
+    }
+    return {
+      name: nameIn.value.trim(),
+      type: typeSel.value,
+      description: descIn.value.trim(),
+      accent: accentIn.value,
+      models: models.read().filter((m) => m.value),
+      pricing: {
+        plan: planIn.value.trim(),
+        amount: amountIn.value === '' ? undefined : Number(amountIn.value),
+        currency: currencyIn.value.trim().toUpperCase() || 'USD',
+        period: periodSel.value,
+        renewsOn: renewsIn.value || undefined,
+        perMillion: Object.keys(perMillion).length ? perMillion : undefined,
+      },
+      env: envOut,
+    };
+  }
 
   function close() {
-    document.removeEventListener('keydown', onKey);
     overlay.remove();
+    document.removeEventListener('keydown', onKey);
   }
-  function onKey(e) {
-    if (e.key === 'Escape') close();
-  }
-  async function create() {
+  function onKey(e) { if (e.key === 'Escape') close(); }
+  async function save() {
+    const body = readBody();
+    if (!body.name) { toast('Give the agent a name', true); nameIn.focus(); return; }
+    if (body.pricing.amount !== undefined && !body.pricing.plan) { toast('Name the plan the amount is for', true); planIn.focus(); return; }
     try {
-      const created = await api('/api/agents', {
-        method: 'POST',
-        body: { name: nameIn.value, type: typeSel.value, description: descIn.value },
-      });
+      let saved;
+      if (editing) {
+        if (liveCount) delete body.type;
+        saved = await api('/api/agents/' + encodeURIComponent(agent.id), { method: 'PUT', body });
+        toast(`Saved ${saved.name}${liveCount ? ' — running instances pick it up on their next run' : ''}`);
+      } else {
+        saved = await api('/api/agents', { method: 'POST', body });
+        toast(`Registered ${saved.name}`);
+      }
       close();
-      toast(`Agent "${created.name}" is online`);
-      location.hash = '#/agent/' + encodeURIComponent(created.id);
-    } catch (err) {
-      toast(err.message, true);
-    }
+      location.hash = '#/agent/' + encodeURIComponent(saved.id);
+      if (editing && currentAgentId() === saved.id) renderAgentDetail(getAgent(saved.id) || saved);
+    } catch (err) { toast(err.message, true); }
   }
+
+  const section = (title, hint, ...kids) => el('div', { class: 'form-section' },
+    el('h4', {}, title), hint ? el('div', { class: 'hint' }, hint) : null, ...kids);
+  const field = (label, input, extra) => el('div', { class: 'field' }, el('label', {}, label), input, extra || null);
 
   const overlay = el('div', {
     class: 'modal-overlay',
     onclick: (e) => { if (e.target === overlay) close(); },
   },
-    el('div', { class: 'modal modal-form' },
+    el('div', { class: 'modal modal-form modal-wide' },
       el('div', { class: 'modal-head' },
-        el('strong', {}, 'New agent'),
+        el('strong', {}, editing ? `Edit ${agent.name}` : 'Register agent'),
         el('button', { class: 'btn sm modal-close', onclick: close }, '✕'),
       ),
       el('div', { class: 'modal-body' },
-        el('div', { class: 'field' }, el('label', {}, 'Name'), nameIn),
-        el('div', { class: 'field' }, el('label', {}, 'Type'), typeSel),
-        el('div', { class: 'field' }, el('label', {}, 'Description'), descIn),
+        section('Identity', null,
+          el('div', { class: 'form-grid' },
+            field('Name', nameIn),
+            field('Type', typeSel),
+            field('Description', descIn),
+            field('Accent', el('div', { class: 'accent-row' }, accentIn, swatches)),
+          ),
+        ),
+        section('Models', 'Options for the instance model dropdown; values go to the CLI (claude --model). Leave empty for the adapter\'s defaults.',
+          models.node),
+        section('Billing', 'A subscription means runs bill $0. A rate card (USD per million tokens) is what runs cost when there is no subscription; with one it only feeds the "≈$ list" estimate. Blank model = the default card.',
+          el('div', { class: 'form-grid' },
+            field('Plan', planIn),
+            field('Cost', el('div', { class: 'money-row' }, amountIn, currencyIn, currencyList, periodSel)),
+            field('Renews on', renewsIn, el('div', { class: 'hint' }, 'Reminder the day before via Telegram/email; rolls forward one period once it passes.')),
+          ),
+          el('div', { class: 'hint', style: 'margin:10px 0 6px' }, 'Rate card'),
+          rates.node,
+        ),
+        section('Environment', 'Extra environment for the spawned CLI. Keep tokens out of Mission Control: put the secret in a file (e.g. ~/.config/zai/token) and choose File — the path is stored, never the token. Values under secret-looking keys are masked here.',
+          env.node),
+        editing ? el('div', { class: 'hint', style: 'margin-top:12px' },
+          'Changes reach existing instances on their next run; a pricing change re-prices stored results.') : null,
       ),
       el('div', { class: 'modal-foot' },
+        el('span', { class: 'kb-spacer' }),
         el('button', { class: 'btn', onclick: close }, 'Cancel'),
-        el('button', { class: 'btn primary', onclick: create }, 'Create agent'),
+        el('button', { class: 'btn primary', onclick: save }, editing ? 'Save' : 'Register'),
       ),
     ),
   );
   document.body.append(overlay);
   document.addEventListener('keydown', onKey);
-  nameIn.addEventListener('keydown', (e) => { if (e.key === 'Enter') create(); });
   nameIn.focus();
 }
 
 /* ── Home / overview ─────────────────────────────────────────────── */
 
 function renderHome() {
-  const online = state.agents.filter((a) => a.status?.state !== 'offline').length;
-  const working = state.agents.filter((a) => a.status?.state === 'working').length;
-  const cost = state.agents.reduce((s, a) => s + (a.status?.totals?.cost || 0), 0);
-  const est = state.agents.reduce((s, a) => s + (a.status?.totals?.estimated ?? a.status?.totals?.cost ?? 0), 0);
+  const working = state.instances.filter((i) => i.status?.state === 'working').length;
+  const cost = state.instances.reduce((s, i) => s + (i.status?.totals?.cost || 0), 0);
+  const est = state.instances.reduce((s, i) => s + (i.status?.totals?.estimated ?? i.status?.totals?.cost ?? 0), 0);
 
   main.replaceChildren(
     el('div', { class: 'page' },
       el('div', { class: 'home-head' },
         el('div', {},
           el('h1', { class: 'page-title' }, 'MISSION CONTROL'),
-          el('p', { class: 'page-sub' }, 'Live status of every agent in the fleet.'),
+          el('p', { class: 'page-sub' }, 'Registered agents and the instances running under each.'),
         ),
-        el('a', { class: 'btn primary sm', href: '#/fleet' }, '⁂ Launch fleet'),
+        el('button', { class: 'btn primary sm', onclick: () => openAgentLauncher() }, '▶ Launch instance'),
       ),
       el('div', { class: 'stats' },
         statTile(state.agents.length, 'Agents registered'),
-        statTile(online, 'Online', online > 0 ? 'var(--green)' : null),
-        statTile(working, 'Active tasks', working > 0 ? 'var(--amber)' : null),
+        statTile(state.instances.length, 'Instances', state.instances.length ? 'var(--green)' : null),
+        statTile(working, 'Working', working > 0 ? 'var(--amber)' : null),
         el('div', { class: 'stat' },
           el('div', {
             class: 'stat-value', id: 'cli-live-count',
@@ -394,7 +831,7 @@ function renderHome() {
           }, String(cliOpenCount())),
           el('div', { class: 'stat-label' }, 'CLI tabs open'),
         ),
-        statTile(fmtCost(cost, est), 'Session spend'),
+        statTile(fmtCost(cost, est), 'Instance spend'),
       ),
       el('div', { class: 'panel cli-live-panel' },
         el('h3', {}, 'Live CLI sessions'),
@@ -402,9 +839,9 @@ function renderHome() {
       ),
       el('div', { class: 'agent-grid' },
         state.agents.map(agentCard),
-        el('button', { class: 'agent-card add-card', onclick: openNewAgentModal },
+        el('button', { class: 'agent-card add-card', onclick: () => openAgentForm(null) },
           el('span', { class: 'add-card-plus' }, '+'),
-          el('span', {}, 'Add agent'),
+          el('span', {}, 'Register agent'),
         ),
       ),
     )
@@ -455,368 +892,6 @@ async function refreshCliSessions() {
   }
 }
 
-/* ── Fleet launch + timeline (M17) ───────────────────────────────── */
-
-// Chart ink for the timeline: the UI accent colours are too light for data
-// marks on the dark panels, so bars wear these darker same-hue twins. The
-// mapping keeps colour following the entity (an agent's bar is always its own
-// accent's hue) and the set is validated for the dark surface (OKLCH L band,
-// chroma, CVD and normal-vision separation, 3:1 contrast).
-const FLEET_CHART_COLORS = {
-  '#d97757': '#cf5c30',
-  '#5eb0ff': '#4a90e2',
-  '#34d399': '#17a673',
-  '#fbbf24': '#b5860d',
-  '#c084fc': '#9d5ce0',
-  '#f472b6': '#d94f8a',
-};
-
-function fleetChartColor(accent) {
-  return FLEET_CHART_COLORS[String(accent || '').toLowerCase()] || '#4a90e2';
-}
-
-const FLEET_WINDOWS = [
-  { label: 'Last hour', ms: 3600e3 },
-  { label: 'Last 6 hours', ms: 6 * 3600e3 },
-  { label: 'Last 24 hours', ms: 24 * 3600e3 },
-  { label: 'Last 7 days', ms: 7 * 864e5 },
-];
-
-function fleetEmptyRow() {
-  return { projectId: '', type: 'claude-code', prompt: '' };
-}
-
-function fleetState() {
-  // Composer rows and the selected window live in state so WS-driven
-  // re-renders of the timeline never eat what's being typed.
-  if (!state.fleet) {
-    state.fleet = {
-      rows: [fleetEmptyRow()],
-      windowMs: 6 * 3600e3,
-      types: null,   // cached /api/agent-types
-      data: null,    // last /api/fleet/timeline response
-      sel: null,     // selected bar key `${agentId}:${start}`
-    };
-  }
-  return state.fleet;
-}
-
-// The stat tiles are patched on every timeline refresh (new runs land, agents
-// get spawned by launches) rather than only on the page's first render.
-function fleetStats() {
-  const lanes = state.fleet?.data?.lanes || [];
-  return {
-    running: lanes.filter((l) => l.runs.some((r) => r.running)).length,
-    agents: state.agents.length,
-    inWindow: lanes.reduce((s, l) => s + l.runs.filter((r) => !r.running).length, 0),
-    queued: state.agents.reduce((s, a) => s + (a.status?.queue?.length || 0), 0),
-  };
-}
-
-function fleetStatTile(key, value, label, color) {
-  const tile = statTile(value, label, color);
-  tile.querySelector('.stat-value').id = 'fleet-stat-' + key;
-  return tile;
-}
-
-function updateFleetStats() {
-  const s = fleetStats();
-  const set = (key, text, color) => {
-    const node = $('#fleet-stat-' + key);
-    if (node) { node.textContent = text; node.style.color = color || ''; }
-  };
-  set('running', String(s.running), s.running > 0 ? 'var(--green)' : '');
-  set('agents', String(s.agents));
-  set('runs', String(s.inWindow));
-  set('queued', String(s.queued), s.queued > 0 ? 'var(--amber)' : '');
-}
-
-async function renderFleet() {
-  const f = fleetState();
-  if (!f.types) {
-    try { f.types = await api('/api/agent-types'); } catch { f.types = []; }
-  }
-  const s = fleetStats();
-
-  main.replaceChildren(
-    el('div', { class: 'page' },
-      el('h1', { class: 'page-title' }, 'FLEET'),
-      el('p', { class: 'page-sub' }, 'Start several agents at once — one per workspace — and watch every run across the fleet.'),
-      el('div', { class: 'stats' },
-        fleetStatTile('running', s.running, 'Running now', s.running > 0 ? 'var(--green)' : null),
-        fleetStatTile('agents', s.agents, 'Agents'),
-        fleetStatTile('runs', s.inWindow, 'Runs in window'),
-        fleetStatTile('queued', s.queued, 'Queued tasks', s.queued > 0 ? 'var(--amber)' : null),
-      ),
-      el('div', { class: 'panel' },
-        el('h3', {}, 'Launch agents'),
-        el('div', { class: 'fleet-hint' },
-          'Each row claims an idle agent of its type — reusing one already in that workspace, repointing a free one, or spawning a fresh agent — so every row runs concurrently.'),
-        el('div', { id: 'fleet-rows' }, ...f.rows.map((row, i) => fleetRow(f, row, i))),
-        el('div', { class: 'fleet-composer-foot' },
-          el('button', {
-            class: 'btn sm',
-            onclick: () => { f.rows.push(fleetEmptyRow()); $('#fleet-rows').append(fleetRow(f, f.rows[f.rows.length - 1], f.rows.length - 1)); },
-          }, '+ Add agent'),
-          el('button', { class: 'btn primary', onclick: launchFleetRows }, 'Launch agents'),
-          el('span', { class: 'fleet-note' }, 'Idle agents are reused before new ones are spawned.'),
-        ),
-      ),
-      el('div', { class: 'panel' },
-        el('div', { class: 'fleet-tl-head' },
-          el('h3', {}, 'Runs across the fleet'),
-          el('div', { class: 'fleet-legend' },
-            el('span', { class: 'fleet-leg-item', title: 'A completed run, in its agent\'s colour' },
-              el('span', { class: 'fleet-leg-swatch done' }), 'run'),
-            el('span', { class: 'fleet-leg-item' }, el('span', { class: 'fleet-leg-swatch failed' }), 'failed'),
-            el('span', { class: 'fleet-leg-item', title: 'In flight — the bar grows until the run ends' },
-              el('span', { class: 'fleet-leg-swatch running' }), 'running'),
-          ),
-          el('select', {
-            class: 'hdr-model',
-            onchange: (e) => { f.windowMs = +e.target.value; f.data = null; refreshFleetTimeline(); },
-          }, FLEET_WINDOWS.map((w) => el('option', {
-            value: String(w.ms),
-            selected: w.ms === f.windowMs ? '' : null,
-          }, w.label))),
-        ),
-        el('div', { id: 'fleet-tl' }, el('div', { class: 'fleet-empty' }, 'Loading timeline…')),
-        el('div', { id: 'fleet-detail' }),
-      ),
-    )
-  );
-  refreshFleetTimeline();
-}
-
-function fleetRow(f, row, i) {
-  const typeOptions = (f.types || []).some((t) => t.type === row.type) ? f.types : [{ type: row.type, label: row.type }, ...(f.types || [])];
-  return el('div', { class: 'fleet-row' },
-    el('select', {
-      class: 'hdr-model fleet-row-proj', title: 'Where this agent works',
-      onchange: (e) => { row.projectId = e.target.value; },
-    },
-      el('option', { value: '' }, 'Own workspace'),
-      state.projects.map((p) => el('option', {
-        value: p.id, selected: p.id === row.projectId ? '' : null,
-      }, p.name)),
-    ),
-    el('select', {
-      class: 'hdr-model fleet-row-type', title: 'Agent type',
-      onchange: (e) => { row.type = e.target.value; },
-    }, typeOptions.map((t) => el('option', {
-      value: t.type, selected: t.type === row.type ? '' : null,
-    }, t.label))),
-    el('input', {
-      class: 'fleet-row-prompt', placeholder: 'Prompt for this agent…', value: row.prompt,
-      oninput: (e) => { row.prompt = e.target.value; },
-      onkeydown: (e) => { if (e.key === 'Enter') launchFleetRows(); },
-    }),
-    el('button', {
-      class: 'btn sm danger fleet-row-x', title: 'Remove this row',
-      onclick: () => {
-        f.rows.splice(f.rows.indexOf(row), 1);
-        if (!f.rows.length) f.rows.push(fleetEmptyRow());
-        renderFleet();
-      },
-    }, '✕'),
-  );
-}
-
-async function launchFleetRows() {
-  const f = fleetState();
-  const rows = f.rows.filter((r) => r.prompt.trim());
-  if (!rows.length) return toast('Add at least one prompt to launch', true);
-  if (rows.length < f.rows.length) {
-    toast(`${f.rows.length - rows.length} row(s) without a prompt were skipped`, true);
-  }
-  try {
-    const res = await api('/api/fleet/launch', {
-      method: 'POST',
-      body: { rows: rows.map((r) => ({ projectId: r.projectId || null, type: r.type, prompt: r.prompt.trim() })) },
-    });
-    const modes = res.launched.map((l) => `${l.agentName} (${l.mode})`).join(' · ');
-    toast(`Launched ${res.launched.length} agent${res.launched.length === 1 ? '' : 's'} — ${modes}`);
-    f.rows = [fleetEmptyRow()];
-    f.sel = null;
-    renderFleet();
-  } catch (err) {
-    toast(err.message, true);
-  }
-}
-
-// Timeline refresh cadence: agent events/status changes debounce a refetch,
-// and a slow interval keeps running bars growing even when a run goes quiet.
-let fleetRefreshTimer = null;
-
-function scheduleFleetRefresh() {
-  if (!onFleetPage()) return;
-  clearTimeout(fleetRefreshTimer);
-  fleetRefreshTimer = setTimeout(refreshFleetTimeline, 1500);
-}
-
-async function refreshFleetTimeline() {
-  if (!onFleetPage()) return;
-  const f = fleetState();
-  let data;
-  try {
-    data = await api(`/api/fleet/timeline?window=${f.windowMs}`);
-  } catch {
-    return;
-  }
-  if (!onFleetPage()) return; // user navigated away mid-fetch
-  f.data = data;
-  drawFleetTimeline();
-}
-
-// A "nice" axis step: the smallest round step that gives ~6 ticks.
-function fleetNiceStep(rangeMs) {
-  const steps = [60e3, 5 * 60e3, 10 * 60e3, 15 * 60e3, 30 * 60e3, 3600e3, 3 * 3600e3, 6 * 3600e3, 12 * 3600e3, 864e5];
-  const target = rangeMs / 6;
-  for (const s of steps) if (s >= target) return s;
-  return 864e5;
-}
-
-function fleetTickLabel(ts, step) {
-  const d = new Date(ts);
-  if (step >= 864e5) {
-    return d.toLocaleDateString([], { weekday: 'short' }) + ' ' + d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
-  }
-  return d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
-}
-
-// Position math is frozen to the fetched {since, now} so bars stay put between
-// refetches; the running bar's width and the gutter clocks advance on refresh.
-function drawFleetTimeline() {
-  const wrap = $('#fleet-tl');
-  if (!wrap) return;
-  const f = fleetState();
-  const data = f.data;
-  if (!data) return;
-  const range = Math.max(1, data.now - data.since);
-  const pct = (ts) => Math.min(100, Math.max(0, ((ts - data.since) / range) * 100));
-  const step = fleetNiceStep(range);
-  const ticks = [];
-  for (let t = Math.ceil(data.since / step) * step; t <= data.now; t += step) ticks.push(t);
-
-  const gridlines = el('div', { class: 'fleet-gridlines' },
-    ticks.map((t) => el('div', { class: 'fleet-gline', style: `left:${pct(t)}%` })));
-
-  const lanes = data.lanes.map((lane) => {
-    const color = fleetChartColor(lane.accent);
-    const isRunning = lane.runs.some((r) => r.running);
-    const bars = lane.runs.map((run) => {
-      const left = pct(run.start);
-      const right = pct(Math.min(run.running ? data.now : run.end, data.now));
-      // Short runs get a visible sliver, pulled back inside the right edge.
-      const width = Math.max(right - left, 0.35);
-      const key = `${lane.id}:${run.start}`;
-      return el('button', {
-        class: 'fleet-bar' + (run.running ? ' running' : '') + (run.failed ? ' failed' : '') + (f.sel === key ? ' selected' : ''),
-        style: `left:${Math.min(left, 100 - width)}%;width:${width}%;background:${run.failed ? 'var(--red)' : color}`,
-        title: run.prompt,
-        onclick: () => { f.sel = f.sel === key ? null : key; drawFleetTimeline(); },
-        onmouseenter: (e) => fleetTip(e, lane, run, color),
-        onmousemove: (e) => fleetTip(e, lane, run, color),
-        onmouseleave: fleetTipHide,
-      });
-    });
-    const liveRun = getAgent(lane.id)?.status?.run;
-    return el('div', { class: 'fleet-lane' },
-      el('div', { class: 'fleet-lane-label', title: `${lane.name}${lane.project ? ' · ' + lane.project : ''}` },
-        el('span', { class: 'fleet-swatch' + (isRunning ? ' running' : ''), style: `background:${color}` }),
-        el('a', { class: 'fleet-lane-name' + (lane.state === 'offline' ? ' offline' : ''), href: `#/agent/${encodeURIComponent(lane.id)}` }, lane.name),
-        lane.project ? el('span', { class: 'fleet-lane-proj' }, lane.project) : null,
-        lane.queue ? el('span', { class: 'fleet-lane-queue' }, `⧗ ${lane.queue}`) : null,
-        isRunning && liveRun ? runClock(liveRun, 'sm') : null,
-      ),
-      el('div', { class: 'fleet-track' },
-        bars.length ? bars : el('span', { class: 'fleet-track-empty' }, 'no runs in this window'),
-      ),
-    );
-  });
-
-  wrap.replaceChildren(
-    lanes.length ? el('div', { class: 'fleet-tl' },
-      el('div', { class: 'fleet-axis-row' },
-        el('div', { class: 'fleet-gutter' }),
-        el('div', { class: 'fleet-axis' },
-          ticks.map((t) => el('span', { class: 'fleet-tick', style: `left:${pct(t)}%` }, fleetTickLabel(t, step)))),
-      ),
-      el('div', { class: 'fleet-lanes' }, gridlines, lanes),
-    ) : el('div', { class: 'fleet-empty' }, 'No agents yet — launch one above.'),
-  );
-  updateFleetStats();
-  drawFleetDetail();
-}
-
-// Run details under the timeline for the selected bar (also the accessible,
-// non-hover record of every field the tooltip shows).
-function drawFleetDetail() {
-  const detail = $('#fleet-detail');
-  if (!detail) return;
-  const f = fleetState();
-  if (!f.sel) {
-    detail.replaceChildren(el('span', { class: 'fleet-note' }, 'Click a bar for run details.'));
-    return;
-  }
-  const [agentId, startStr] = [f.sel.slice(0, f.sel.lastIndexOf(':')), +f.sel.slice(f.sel.lastIndexOf(':') + 1)];
-  const lane = f.data?.lanes.find((l) => l.id === agentId);
-  const run = lane?.runs.find((r) => r.start === startStr);
-  if (!lane || !run) {
-    f.sel = null;
-    detail.replaceChildren(el('span', { class: 'fleet-note' }, 'Click a bar for run details.'));
-    return;
-  }
-  const stateLabel = run.running ? `running · ${fmtClock(Date.now() - run.start)} elapsed` : run.failed ? 'failed' : 'complete';
-  detail.replaceChildren(
-    el('a', { class: 'fleet-lane-name', href: `#/agent/${encodeURIComponent(lane.id)}` }, lane.name),
-    el('span', {}, run.pid ? projName(run.pid) : 'default workspace'),
-    el('span', {}, stateLabel),
-    el('span', {}, `took ${fmtClock(run.durationMs || 0)}`),
-    run.running && run.estimateMs ? el('span', {}, `~${fmtClock(run.estimateMs)} est. (${run.estimateBasis})`) : null,
-    typeof run.cost === 'number' ? el('span', {}, fmtCost(run.cost, run.estimated)) : null,
-    el('span', {}, new Date(run.start).toLocaleString()),
-    originChip(run.origin) || el('span', { class: 'fleet-note' }, 'no origin'),
-    el('div', { class: 'fleet-detail-prompt' }, run.prompt || '(no prompt text)'),
-  );
-}
-
-// Floating tooltip for a run bar. One shared node; positioned by cursor.
-let fleetTipNode = null;
-
-function fleetTip(e, lane, run, color) {
-  if (!fleetTipNode) {
-    fleetTipNode = el('div', { class: 'fleet-tip' });
-    document.body.append(fleetTipNode);
-  }
-  const stateLabel = run.running ? 'running' : run.failed ? 'failed' : 'complete';
-  fleetTipNode.replaceChildren(
-    el('div', { class: 'fleet-tip-head' },
-      el('span', { class: 'fleet-swatch', style: `background:${color}` }),
-      el('strong', {}, lane.name),
-      el('span', { class: run.failed ? 'fleet-tip-state failed' : 'fleet-tip-state' }, stateLabel),
-    ),
-    el('div', { class: 'fleet-tip-line' }, run.pid ? projName(run.pid) : 'default workspace'),
-    el('div', { class: 'fleet-tip-line' }, `${fmtClock(run.durationMs || 0)} · ${new Date(run.start).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}`),
-    run.prompt ? el('div', { class: 'fleet-tip-prompt' }, run.prompt) : null,
-  );
-  fleetTipNode.style.display = 'block';
-  const x = Math.min(e.clientX + 14, window.innerWidth - 360);
-  fleetTipNode.style.left = x + 'px';
-  fleetTipNode.style.top = Math.max(8, e.clientY - 12) + 'px';
-}
-
-function fleetTipHide() {
-  if (fleetTipNode) fleetTipNode.style.display = 'none';
-}
-
-// Keep running bars growing and idle pages honest even without WS traffic.
-setInterval(() => {
-  if ($('#fleet-tl') && state.fleet?.data?.lanes?.some((l) => l.runs.some((r) => r.running))) {
-    refreshFleetTimeline();
-  }
-}, 5000);
-
 /* ── Run origin + duration estimate ──────────────────────────────── */
 
 // Human label for where a run came from: chat, a board card, or the queue
@@ -826,9 +901,8 @@ function originLabel(origin) {
   const card = origin.taskTitle ? ' · ' + origin.taskTitle : '';
   if (origin.kind === 'chat') return '💬 chat';
   if (origin.kind === 'board') return '⌗ board' + card;
-  if (origin.kind === 'fleet') return '⁂ fleet';
   if (origin.kind === 'queue') {
-    const via = origin.via === 'board' ? '⌗ board' + card : origin.via === 'fleet' ? '⁂ fleet' : '💬 chat';
+    const via = origin.via === 'board' ? '⌗ board' + card : '💬 chat';
     return '⧗ queue ← ' + via;
   }
   return origin.kind;
@@ -895,35 +969,55 @@ function statTile(value, label, color) {
   );
 }
 
+// One card per registered agent, its instances grouped inside: each row is a
+// live session with its project, state, run clock, queue and cost.
 function agentCard(agent) {
-  const st = agent.status || {};
-  const stateName = st.state || 'offline';
-  return el('a', {
-    class: 'agent-card',
-    href: `#/agent/${encodeURIComponent(agent.id)}`,
+  const kids = instancesOf(agent.id);
+  const stateName = !agent.available ? 'offline' : kids.some((i) => i.status?.state === 'working') ? 'working' : 'online';
+  return el('div', {
+    class: 'agent-card agent-card-group',
     style: `--card-accent:${agent.accent || 'var(--accent)'}`,
   },
-    el('div', { class: 'agent-card-head' },
+    el('a', { class: 'agent-card-head', href: `#/agent/${encodeURIComponent(agent.id)}` },
       el('span', { class: `dot ${stateName}` }),
       el('span', { class: 'agent-card-name' }, agent.name),
-      el('span', { class: `state-badge ${stateName}` }, stateName),
+      el('span', { class: `state-badge ${stateName}` }, agent.available ? `${kids.length} instance${kids.length === 1 ? '' : 's'}` : 'unavailable'),
     ),
     el('div', { class: 'agent-card-desc' }, agent.description || ''),
-    el('div', { class: 'agent-card-task' + (st.currentTask ? '' : ' idle') },
-      st.currentTask ? '▸ ' + st.currentTask : 'standing by',
+    kids.length
+      ? el('div', { class: 'instance-list' }, kids.map(instanceRow))
+      : el('div', { class: 'agent-card-task idle' }, agent.available ? 'no instances — ▶ to launch one' : 'CLI not found on this machine'),
+    el('div', { class: 'btn-row agent-card-foot' },
+      el('button', {
+        class: 'btn sm primary', disabled: agent.available ? null : '',
+        onclick: () => openAgentLauncher(agent.id),
+      }, '▶ Launch'),
+      el('a', { class: 'btn sm', href: `#/agent/${encodeURIComponent(agent.id)}` }, 'Configure'),
     ),
-    st.run ? el('div', { class: 'agent-card-run' },
-      originChip(st.run.origin),
-      runClock(st.run),
-    ) : null,
-    el('div', { class: 'agent-card-meta' },
-      el('span', {}, '▣ ' + (st.project?.name || 'default ws')),
+  );
+}
+
+function instanceRow(i) {
+  const st = i.status || {};
+  const stateName = st.state || 'offline';
+  return el('a', {
+    class: 'instance-row',
+    href: `#/instance/${encodeURIComponent(i.id)}`,
+    title: i.name,
+  },
+    el('span', { class: `dot ${stateName}` }),
+    el('span', { class: 'instance-row-main' },
+      el('span', { class: 'instance-row-name' }, '▣ ' + projName(i.projectId)),
+      el('span', { class: 'instance-row-task' + (st.currentTask ? '' : ' idle') },
+        st.currentTask ? '▸ ' + st.currentTask : 'standing by'),
+      st.run ? el('span', { class: 'agent-card-run' }, originChip(st.run.origin, 'sm'), runClock(st.run, 'sm')) : null,
+    ),
+    el('span', { class: 'instance-row-meta' },
       el('span', {}, modelLabel(st)),
-      st.queue?.length ? el('span', { class: 'card-queue' }, `⧗ ${st.queue.length} queued`) : null,
-      st.subagents?.length ? el('span', { class: 'card-queue' }, `⑂ ${st.subagents.length} subagent${st.subagents.length === 1 ? '' : 's'}`) : null,
-      el('span', {}, `runs ${st.totals?.runs ?? 0}`),
+      st.queue?.length ? el('span', { class: 'card-queue' }, `⧗ ${st.queue.length}`) : null,
+      st.subagents?.length ? el('span', { class: 'card-queue' }, `⑂ ${st.subagents.length}`) : null,
       el('span', {}, fmtCost(st.totals?.cost, st.totals?.estimated)),
-      el('span', {}, `active ${fmtAgo(st.lastActivity)}`),
+      el('span', {}, fmtAgo(st.lastActivity)),
     ),
   );
 }
@@ -966,7 +1060,7 @@ function renderProjects() {
 
 function projectCard(p) {
   if (state.projEdit === p.id) return projectForm(p);
-  const agentNames = (p.agents || []).map((aid) => getAgent(aid)?.name || aid);
+  const live = state.instances.filter((i) => i.projectId === p.id);
   return el('div', { class: 'panel proj-card' },
     el('div', { class: 'proj-head' },
       el('strong', {}, p.name),
@@ -974,10 +1068,12 @@ function projectCard(p) {
     ),
     p.description ? el('div', { class: 'proj-desc' }, p.description) : null,
     el('div', { class: 'proj-agents' },
-      agentNames.length ? '⚡ ' + agentNames.join(', ') + ' pointed here' : 'no agents pointed here'),
+      live.length
+        ? '⚡ ' + live.map((i) => `${i.agent}${i.status?.state === 'working' ? ' (working)' : ''}`).join(', ') + ' running here'
+        : 'no instances running here'),
     el('div', { class: 'proj-agents chist-line', id: 'chist-' + p.id }, '🧠 checking local Claude Code history…'),
     el('div', { class: 'btn-row' },
-      el('button', { class: 'btn sm', onclick: () => { location.hash = '#/project/' + encodeURIComponent(p.id); } }, '🧠 History'),
+      el('button', { class: 'btn sm', onclick: () => { location.hash = '#/project/' + encodeURIComponent(p.id); } }, '🗂 Conversations'),
       el('button', { class: 'btn sm', onclick: () => { state.projEdit = p.id; renderProjects(); } }, 'Edit'),
       el('button', {
         class: 'btn sm danger',
@@ -1099,6 +1195,26 @@ async function renderAnalytics() {
     })
   );
 
+  // Subscriptions (M15): flat-rate plans as a real line item next to the
+  // per-run figures — monthly equivalent per currency, renewal countdown.
+  const subs = data.subscriptions || [];
+  const subTotals = {};
+  for (const s of subs) if (typeof s.monthlyEquivalent === 'number') subTotals[s.currency] = (subTotals[s.currency] || 0) + s.monthlyEquivalent;
+  const subTotalText = Object.keys(subTotals).length
+    ? Object.entries(subTotals).map(([c, v]) => fmtMoney(Math.round(v * 100) / 100, c)).join(' + ') : '—';
+  const subRows = subs.map((s) => {
+    const days = s.daysToRenewal;
+    const rel = days === null ? '—' : days < 0 ? `${-days}d overdue` : days === 0 ? 'today' : days === 1 ? 'tomorrow' : `in ${days} days`;
+    const color = days === null ? '' : days < 0 ? 'color:var(--red)' : days <= 7 ? 'color:var(--amber)' : '';
+    return el('tr', {},
+      el('td', {}, el('a', { href: '#/agent/' + encodeURIComponent(s.agentId) }, s.name)),
+      el('td', {}, s.plan),
+      el('td', {}, typeof s.amount === 'number' ? `${fmtMoney(s.amount, s.currency)}/${s.period === 'year' ? 'yr' : 'mo'}` : '—'),
+      el('td', {}, typeof s.monthlyEquivalent === 'number' ? fmtMoney(Math.round(s.monthlyEquivalent * 100) / 100, s.currency) : '—'),
+      el('td', { style: color }, s.renewsOn ? `${s.renewsOn} · ${rel}` : '—'),
+    );
+  });
+
   const agentsSorted = [...data.agents].sort((a, b) => b.estimated - a.estimated);
   const projSorted = [...data.projects].sort((a, b) => b.estimated - a.estimated);
   const maxAgentCost = Math.max(...agentsSorted.map((a) => a.estimated), 0.0001);
@@ -1144,11 +1260,17 @@ async function renderAnalytics() {
     else if (item.kind === 'done') text = `finished${item.durationMs ? ' in ' + fmtDur(item.durationMs) : ''}${typeof item.cost === 'number' ? ' · ' + fmtCost(item.cost, item.estimated) : ''}`;
     else if (item.kind === 'fail') text = 'run failed';
     else text = item.text || '';
-    return el('div', { class: 'feed-item', onclick: () => { location.hash = '#/agent/' + encodeURIComponent(item.agentId); } },
+    // A live instance opens its Control Room; a closed one opens the
+    // conversation in the project's history.
+    const open = () => {
+      if (item.iid && getInstance(item.iid)) location.hash = '#/instance/' + encodeURIComponent(item.iid);
+      else if (item.pid) location.hash = '#/project/' + encodeURIComponent(item.pid) + (item.cid ? '/' + encodeURIComponent(item.cid) : '');
+    };
+    return el('div', { class: 'feed-item', onclick: open },
       el('span', { class: 'feed-time' }, fmtFeedTime(item.ts)),
       el('span', { class: 'feed-ic', style: `color:${color}` }, icon),
       el('span', { class: 'feed-text' },
-        el('b', {}, item.agent), ' ', text,
+        el('b', {}, item.instance || item.agent), ' ', text,
         item.pid ? el('span', { class: 'feed-proj' }, ' ▣ ' + projName(item.pid)) : null,
       ),
     );
@@ -1161,10 +1283,20 @@ async function renderAnalytics() {
       el('div', { class: 'stats' },
         statTile('$' + t.todayCost.toFixed(2), 'Spend today' + (Math.abs(t.todayEstimated - t.todayCost) > 1e-9 ? ` · ≈$${t.todayEstimated.toFixed(2)} list` : '')),
         statTile('$' + t.weekCost.toFixed(2), 'Last 7 days' + (Math.abs(t.weekEstimated - t.weekCost) > 1e-9 ? ` · ≈$${t.weekEstimated.toFixed(2)} list` : '')),
+        statTile(subTotalText, 'Subscriptions / month'),
         statTile(t.runs, 'Runs'),
         statTile(t.successRate === null ? '—' : Math.round(t.successRate * 100) + '%', 'Success rate',
           t.successRate !== null && t.successRate < 0.9 ? 'var(--amber)' : null),
         statTile(fmtDur(t.avgMs), 'Avg run'),
+      ),
+      el('div', { class: 'panel' },
+        el('h3', {}, 'Subscriptions'),
+        subs.length
+          ? el('div', { style: 'overflow-x:auto' },
+              el('table', { class: 'an-table' },
+                el('thead', {}, el('tr', {}, ['Agent', 'Plan', 'Cost', 'Per month', 'Renews'].map((h) => el('th', {}, h)))),
+                el('tbody', {}, subRows)))
+          : el('div', { class: 'hint' }, 'No flat-rate plans registered. Add one on an agent\'s page (Edit → Billing) to see it here and get a reminder the day before it renews.'),
       ),
       data.budget.threshold > 0 ? el('div', { class: 'panel budget-panel' },
         el('h3', {}, `Daily budget — $${data.budget.threshold.toFixed(2)}`),
@@ -1250,6 +1382,7 @@ async function renderAlerts() {
   const evDone = checkRow('Run completed', cfg.events.runComplete);
   const evFail = checkRow('Run failed / errored', cfg.events.runFailed);
   const evOff = checkRow('Agent went offline', cfg.events.agentOffline);
+  const evRenew = checkRow('Subscription renews tomorrow', cfg.events.renewalReminder !== false);
   const evCost = textIn(cfg.events.costThreshold || '', '0 = off');
 
   async function save(quiet) {
@@ -1270,6 +1403,7 @@ async function renderAlerts() {
         runComplete: evDone.box.checked,
         runFailed: evFail.box.checked,
         agentOffline: evOff.box.checked,
+        renewalReminder: evRenew.box.checked,
         costThreshold: +evCost.value || 0,
       },
     };
@@ -1345,7 +1479,7 @@ async function renderAlerts() {
         ),
         el('div', { class: 'panel span2' },
           el('h3', {}, 'What to notify about'),
-          el('div', { class: 'check-grid' }, evDone.row, evFail.row, evOff.row),
+          el('div', { class: 'check-grid' }, evDone.row, evFail.row, evOff.row, evRenew.row),
           field('Daily cost alert threshold ($)', evCost),
           el('button', { class: 'btn primary', onclick: () => trySave(false).catch(() => {}) }, 'Save settings'),
         ),
@@ -1903,14 +2037,26 @@ function showMenu(x, y, items) {
   setTimeout(() => document.addEventListener('mousedown', onDoc, true));
 }
 
+// Cards go to an instance on the card's project; none running means launch
+// one first (the launcher opens on the board's project).
+function boardInstances() {
+  return state.instances.filter((i) => i.projectId === state.boardProj);
+}
+
 function dispatchMenu(task, x, y) {
-  if (!state.agents.length) return toast('No agents available', true);
-  showMenu(x, y, state.agents.map((a) => ({
-    label: `▶ ${a.name}${a.status?.state === 'offline' ? ' (offline)' : a.status?.state === 'working' ? ' (will queue)' : ''}`,
+  const pool = boardInstances();
+  if (!task.projectId) return toast('Cards on the default workspace can\'t be dispatched — every instance works in a project', true);
+  if (!pool.length) {
+    toast('No instances on this project — launch one first', true);
+    agentLaunchState().projectId = task.projectId;
+    return openAgentLauncher();
+  }
+  showMenu(x, y, pool.map((a) => ({
+    label: `▶ ${a.agent}${a.status?.state === 'offline' ? ' (offline)' : a.status?.state === 'working' ? ' (will queue)' : ''}`,
     disabled: a.status?.state === 'offline',
     onclick: async () => {
       try {
-        const r = await api(`/api/tasks/${task.id}/dispatch`, { method: 'POST', body: { agentId: a.id } });
+        const r = await api(`/api/tasks/${task.id}/dispatch`, { method: 'POST', body: { instanceId: a.id } });
         toast(r.queued ? `Dispatched to ${a.name} — queued #${r.position}` : `Dispatched to ${a.name}`);
       } catch (err) { toast(err.message, true); }
     },
@@ -1931,11 +2077,12 @@ function renderBoard() {
   );
   projSel.onchange = () => { state.boardProj = projSel.value || null; renderBoard(); };
 
-  // Agent chips double as drag-to-dispatch drop targets.
-  const agentChips = state.agents.map((a) => {
-    const chip = el('div', { class: `kb-agent ${a.status?.state || 'offline'}` },
+  // Instance chips (this project's) double as drag-to-dispatch drop targets.
+  const pool = boardInstances();
+  const agentChips = pool.map((a) => {
+    const chip = el('div', { class: `kb-agent ${a.status?.state || 'offline'}`, title: a.name },
       el('span', { class: `dot ${a.status?.state || 'offline'}` }),
-      el('span', {}, a.name),
+      el('span', {}, a.agent),
       a.status?.queue?.length ? el('span', { class: 'nav-queue-badge' }, String(a.status.queue.length)) : null,
     );
     chip.addEventListener('dragover', (e) => { e.preventDefault(); chip.classList.add('drop'); });
@@ -1946,12 +2093,18 @@ function renderBoard() {
       const taskId = e.dataTransfer.getData('text/plain');
       if (!taskId) return;
       try {
-        const r = await api(`/api/tasks/${taskId}/dispatch`, { method: 'POST', body: { agentId: a.id } });
+        const r = await api(`/api/tasks/${taskId}/dispatch`, { method: 'POST', body: { instanceId: a.id } });
         toast(r.queued ? `Dispatched to ${a.name} — queued #${r.position}` : `Dispatched to ${a.name}`);
       } catch (err) { toast(err.message, true); }
     });
     return chip;
   });
+  if (!agentChips.length && cur) {
+    agentChips.push(el('button', {
+      class: 'kb-agent kb-agent-launch',
+      onclick: () => { agentLaunchState().projectId = cur; openAgentLauncher(); },
+    }, '▶ launch an instance here'));
+  }
 
   main.replaceChildren(
     el('div', { class: 'page board-page' },
@@ -1997,23 +2150,28 @@ function kanbanColumn(key, label, tasks) {
 }
 
 function kanbanCard(task) {
-  const agent = task.agentId ? getAgent(task.agentId) : null;
+  const inst = task.instanceId ? getInstance(task.instanceId) : null;
+  const agentName = inst ? inst.agent : (task.agentId ? getAgent(task.agentId)?.name || task.agentId : null);
   const card = el('div', { class: 'kb-card', draggable: 'true' },
     el('div', { class: 'kb-card-title' }, task.title),
     task.description ? el('div', { class: 'kb-card-desc' }, task.description) : null,
     el('div', { class: 'kb-card-foot' },
-      agent ? el('span', { class: 'kb-card-agent' },
-        el('span', { class: `dot ${agent.status?.state || 'offline'}` }), agent.name) : null,
+      agentName ? el('span', { class: 'kb-card-agent', title: inst ? inst.name : 'instance closed' },
+        el('span', { class: `dot ${inst?.status?.state || 'offline'}` }), agentName) : null,
       task.result === 'error' ? el('span', { class: 'kb-badge err' }, 'failed') : null,
       task.result === 'stopped' ? el('span', { class: 'kb-badge warn' }, 'stopped') : null,
       el('span', { class: 'kb-spacer' }),
-      task.cid && task.agentId ? el('button', {
-        class: 'btn sm', title: 'Open the session that worked this card',
+      task.cid ? el('button', {
+        class: 'btn sm', title: 'Open the conversation that worked this card',
         onclick: (e) => {
           e.stopPropagation();
-          state.sessionSel[task.agentId] = task.cid;
-          state.tab = 'sessions';
-          location.hash = '#/agent/' + encodeURIComponent(task.agentId);
+          if (inst) {
+            state.sessionSel[inst.id] = task.cid;
+            state.tab = 'sessions';
+            location.hash = '#/instance/' + encodeURIComponent(inst.id);
+          } else if (task.projectId) {
+            location.hash = '#/project/' + encodeURIComponent(task.projectId) + '/' + encodeURIComponent(task.cid);
+          }
         },
       }, '🗂') : null,
       task.column !== 'inprogress' ? el('button', {
@@ -2092,18 +2250,25 @@ function openTaskModal(task) {
   titleIn.focus();
 }
 
-/* ── Project history (native Claude Code session store) ──────────── */
+/* ── Project conversations + local Claude Code history ──────────── */
 
+// History belongs to the project (Round 5): every conversation any instance
+// ran against it, newest first, then the native Claude Code sessions run from
+// its folder in a terminal.
 async function renderProjectHistory(projectId) {
   const project = state.projects.find((p) => p.id === projectId);
   if (!project) {
     location.hash = '#/projects';
     return;
   }
-  main.replaceChildren(el('div', { class: 'ws-empty', style: 'height:100%' }, 'Reading local Claude Code store…'));
-  let data;
+  main.replaceChildren(el('div', { class: 'ws-empty', style: 'height:100%' }, 'Reading project history…'));
+  let convs = [];
+  let data = { sessions: [], parentSessions: [] };
   try {
-    data = await api(`/api/projects/${projectId}/claude-sessions`);
+    [convs, data] = await Promise.all([
+      api(`/api/projects/${encodeURIComponent(projectId)}/conversations`),
+      api(`/api/projects/${encodeURIComponent(projectId)}/claude-sessions`).catch(() => data),
+    ]);
   } catch (err) {
     main.replaceChildren(el('div', { class: 'page' }, el('p', { class: 'page-sub' }, err.message)));
     return;
@@ -2111,22 +2276,24 @@ async function renderProjectHistory(projectId) {
 
   const list = el('div', { class: 'ws-list' });
   const detail = el('div', { class: 'sess-detail' });
-  let selectedId = null;
+  let selectedId = currentProjectCid();
+  const local = [...data.sessions, ...(data.parentSessions || [])];
 
   main.replaceChildren(
     el('div', { class: 'agent-page' },
       el('header', { class: 'agent-header' },
         el('a', { href: '#/projects', class: 'btn sm' }, '← Projects'),
-        el('h1', {}, project.name + ' — history'),
-        el('span', { class: 'header-task', title: data.storeDir },
-          `local Claude Code sessions for ${project.path}`),
+        el('h1', {}, project.name + ' — conversations'),
+        el('span', { class: 'header-task', title: project.path },
+          `${convs.length} from Mission Control · ${local.length} local Claude Code session${local.length === 1 ? '' : 's'}`),
+        el('button', {
+          class: 'btn primary sm',
+          onclick: () => { agentLaunchState().projectId = projectId; openAgentLauncher(); },
+        }, '▶ Launch instance'),
       ),
       el('div', { class: 'agent-body' },
         el('div', { class: 'ws-wrap' },
-          el('div', { class: 'ws-tree', style: 'width:320px' },
-            el('div', { class: 'ws-tree-head' },
-              el('span', { class: 'crumb' }, `${data.sessions.length} session${data.sessions.length === 1 ? '' : 's'}`),
-            ),
+          el('div', { class: 'ws-tree', style: 'width:340px' },
             list,
           ),
           detail,
@@ -2134,6 +2301,29 @@ async function renderProjectHistory(projectId) {
       ),
     )
   );
+
+  function convEntry(c) {
+    const inst = c.iid ? getInstance(c.iid) : null;
+    return el('div', {
+      class: 'sess-entry' + (c.cid === selectedId ? ' selected' : ''),
+      onclick: () => openConversation(c),
+    },
+      el('div', { class: 'sess-title' },
+        c.active ? el('span', { class: 'sess-badge' }, 'ACTIVE') : null,
+        el('span', { class: 'sess-title-text' }, c.firstPrompt || '(no messages)'),
+      ),
+      el('div', { class: 'sess-meta' },
+        el('span', { class: 'sess-proj', style: c.accent ? `color:${c.accent}` : null }, c.agent || 'unknown agent'),
+        inst ? el('span', { class: `dot ${inst.status?.state || 'offline'}`, title: inst.name }) : null,
+        c.origin ? originChip(c.origin, 'sm') : null,
+        el('span', {}, new Date(c.startedAt).toLocaleString()),
+        el('span', {}, `${c.prompts} msg`),
+        c.failures ? el('span', { style: 'color:var(--red)' }, `${c.failures} failed`) : null,
+        el('span', {}, fmtCost(c.cost, c.estimated)),
+        c.durationMs ? el('span', {}, fmtDur(c.durationMs)) : null,
+      ),
+    );
+  }
 
   function sessionEntry(s) {
     return el('div', {
@@ -2154,17 +2344,82 @@ async function renderProjectHistory(projectId) {
   }
 
   function renderList() {
-    list.replaceChildren(...data.sessions.map(sessionEntry));
-    if (!data.sessions.length) {
-      list.append(el('div', { class: 'ws-empty', style: 'padding:20px' },
-        'No sessions ran from this exact folder.'));
+    list.replaceChildren(
+      el('div', { class: 'git-section-title' }, `MISSION CONTROL — ${convs.length}`),
+      ...convs.map(convEntry),
+    );
+    if (!convs.length) {
+      list.append(el('div', { class: 'ws-empty', style: 'padding:14px 12px' },
+        'No instance has run against this project yet.'));
     }
+    list.append(el('div', { class: 'git-section-title' }, `LOCAL CLAUDE CODE — ${data.sessions.length}`));
+    if (!data.sessions.length) {
+      list.append(el('div', { class: 'ws-empty', style: 'padding:14px 12px' },
+        'No terminal sessions ran from this exact folder.'));
+    }
+    list.append(...data.sessions.map(sessionEntry));
     if (data.parentSessions?.length) {
       list.append(
         el('div', { class: 'git-section-title' }, 'FROM PARENT FOLDERS'),
         ...data.parentSessions.map(sessionEntry),
       );
     }
+  }
+
+  function transcriptHead(label, s, extra) {
+    return el('div', { class: 'sess-detail-head' },
+      el('span', {}, label),
+      el('span', {}, `${s.prompts} messages`),
+      s.runs ? el('span', {}, `${s.runs} runs`) : null,
+      s.cost || s.estimated ? el('span', {}, fmtCost(s.cost, s.estimated, 4)) : null,
+      s.models.size ? el('span', {}, [...s.models].join(', ')) : null,
+      extra,
+      el('span', { class: 'kb-spacer' }),
+      el('button', {
+        class: 'btn sm',
+        onclick: async () => {
+          try {
+            await navigator.clipboard.writeText(sessionToMarkdown({ name: project.name, id: projectId }, s));
+            toast('Transcript copied as Markdown');
+          } catch (err) { toast(err.message, true); }
+        },
+      }, '⧉ Copy'),
+      el('button', {
+        class: 'btn sm',
+        onclick: () => downloadSessionMd({ name: project.name, id: projectId }, s),
+      }, '⬇ Export'),
+    );
+  }
+
+  function showTranscript(head, events) {
+    const log = el('div', { class: 'chat-log' });
+    detail.replaceChildren(head, log);
+    for (const ev of events) {
+      const node = renderEvent(ev);
+      if (node) log.append(node);
+    }
+    log.scrollTop = log.scrollHeight;
+  }
+
+  async function openConversation(c) {
+    selectedId = c.cid;
+    renderList();
+    detail.replaceChildren(el('div', { class: 'ws-empty' }, 'Loading conversation…'));
+    let events;
+    try {
+      events = await api(`/api/projects/${encodeURIComponent(projectId)}/history?cid=${encodeURIComponent(c.cid)}`);
+    } catch (err) {
+      detail.replaceChildren(el('div', { class: 'ws-empty' }, err.message));
+      return;
+    }
+    const s = computeSessions(events)[0] || { cid: c.cid, pid: projectId, events, startedAt: c.startedAt, endedAt: c.endedAt, prompts: 0, runs: 0, cost: 0, estimated: 0, models: new Set() };
+    const inst = c.iid ? getInstance(c.iid) : null;
+    showTranscript(transcriptHead(
+      `${c.agent || 'agent'} · ${new Date(c.startedAt).toLocaleString()}`,
+      s,
+      inst ? el('a', { class: 'btn sm', href: `#/instance/${encodeURIComponent(inst.id)}` }, '↗ open instance')
+        : el('span', { class: 'sess-proj' }, 'instance closed'),
+    ), events);
   }
 
   async function openSession(s) {
@@ -2178,7 +2433,6 @@ async function renderProjectHistory(projectId) {
       detail.replaceChildren(el('div', { class: 'ws-empty' }, err.message));
       return;
     }
-    const log = el('div', { class: 'chat-log' });
     const pseudo = {
       cid: s.id,
       pid: projectId,
@@ -2187,41 +2441,22 @@ async function renderProjectHistory(projectId) {
       endedAt: s.mtime,
       runs: 0,
       cost: 0,
+      estimated: 0,
       prompts: sess.events.filter((e) => e.type === 'user_prompt').length,
       models: new Set(s.model ? [s.model] : []),
     };
-    detail.replaceChildren(
-      el('div', { class: 'sess-detail-head' },
-        el('span', {}, 'session ' + s.id.slice(0, 8)),
-        el('span', {}, `${pseudo.prompts} messages`),
-        sess.truncated ? el('span', {}, `(showing last ${sess.events.length} of ${sess.total} events)`) : null,
-        el('span', { class: 'kb-spacer' }),
-        el('button', {
-          class: 'btn sm',
-          onclick: async () => {
-            try {
-              await navigator.clipboard.writeText(sessionToMarkdown({ name: project.name, id: 'claude-local' }, pseudo));
-              toast('Transcript copied as Markdown');
-            } catch (err) { toast(err.message, true); }
-          },
-        }, '⧉ Copy'),
-        el('button', {
-          class: 'btn sm',
-          onclick: () => downloadSessionMd({ name: project.name, id: 'claude-local' }, pseudo),
-        }, '⬇ Export'),
-      ),
-      log,
-    );
-    for (const ev of sess.events) {
-      const node = renderEvent(ev);
-      if (node) log.append(node);
-    }
-    log.scrollTop = log.scrollHeight;
+    showTranscript(transcriptHead(
+      'local session ' + s.id.slice(0, 8),
+      pseudo,
+      sess.truncated ? el('span', {}, `(showing last ${sess.events.length} of ${sess.total} events)`) : null,
+    ), sess.events);
   }
 
   renderList();
-  const first = data.sessions[0] || data.parentSessions?.[0];
-  if (first) openSession(first);
+  const wanted = selectedId ? convs.find((c) => c.cid === selectedId) : null;
+  if (wanted) openConversation(wanted);
+  else if (convs[0]) openConversation(convs[0]);
+  else if (local[0]) openSession(local[0]);
   else detail.append(el('div', { class: 'ws-empty' }, 'No transcripts to show'));
 }
 
@@ -2304,8 +2539,136 @@ function openFolderPicker(initial, onPick) {
   load(initial || '');
 }
 
-/* ── Agent page ──────────────────────────────────────────────────── */
+/* ── Registered agent page ───────────────────────────────────────── */
 
+// Definition view for one registered agent: what it is, its default settings,
+// the instances running under it, and Remove (refused while any exist).
+// The definition is edited through the same modal as registration (M21);
+// this page stays read-only so the re-render on every broadcast is harmless.
+async function renderAgentDetail(agent) {
+  if (!agent) return renderHome();
+  const kids = instancesOf(agent.id);
+  const settingsPane = el('div', { id: 'agent-settings' }, el('div', { class: 'hint' }, 'Loading settings…'));
+  const spendPane = el('div', { id: 'agent-spend' }, el('div', { class: 'hint' }, 'Loading…'));
+  const kvRow = (k, v) => el('div', { class: 'kv' }, el('span', { class: 'k' }, k), el('span', { class: 'v' }, v));
+  const pricing = agent.pricing || null;
+  const renewal = renewalText(pricing);
+  const envRows = Object.entries(agent.env || {});
+  const envText = !envRows.length ? 'inherits the server\'s'
+    : el('div', { class: 'env-list' }, envRows.map(([k, v]) => el('div', {},
+        el('span', { class: 'env-key' }, k), ' = ',
+        v && typeof v === 'object' && v.file ? el('span', { class: 'env-file', title: 'read from this file at spawn' }, '📄 ' + v.file)
+          : v && typeof v === 'object' && v.secret ? el('span', { class: 'env-secret' }, '••••••')
+          : String(v))));
+  main.replaceChildren(
+    el('div', { class: 'page' },
+      el('div', { class: 'home-head' },
+        el('div', {},
+          el('h1', { class: 'page-title', style: `--card-accent:${agent.accent || 'var(--accent)'}` },
+            el('span', { class: 'nav-agent-swatch', style: `--agent-accent:${agent.accent || 'var(--accent)'}` }), ' ', agent.name.toUpperCase()),
+          el('p', { class: 'page-sub' }, agent.description || 'Registered agent'),
+        ),
+        el('div', { class: 'btn-row' },
+          el('button', {
+            class: 'btn primary sm', disabled: agent.available ? null : '',
+            onclick: () => openAgentLauncher(agent.id),
+          }, '▶ Launch instance'),
+          el('button', { class: 'btn sm', onclick: () => openAgentForm(agent) }, '✎ Edit'),
+          el('button', {
+            class: 'btn sm danger', disabled: kids.length ? '' : null,
+            title: kids.length ? 'Close its instances first' : 'Remove this agent from the registry',
+            onclick: async () => {
+              if (!confirm(`Remove agent "${agent.name}"?\nProject histories keep every conversation it ran.`)) return;
+              try {
+                await api('/api/agents/' + encodeURIComponent(agent.id), { method: 'DELETE' });
+                toast('Agent removed');
+                location.hash = '#/';
+              } catch (err) { toast(err.message, true); }
+            },
+          }, 'Remove'),
+        ),
+      ),
+      el('div', { class: 'control-grid', style: 'margin-top:16px' },
+        el('div', { class: 'panel' },
+          el('h3', {}, 'Definition'),
+          kvRow('Type', agent.type),
+          kvRow('Availability', agent.available ? 'CLI found' : 'CLI not found on this machine'),
+          kvRow('Models', agent.models?.length ? agent.models.map((m) => m.label || m.value).join(', ') : 'adapter defaults'),
+          kvRow('Billing', pricingSummary(pricing)),
+          renewal ? kvRow('Renews', el('span', { style: renewal.days <= 1 ? 'color:var(--amber)' : '' }, renewal.text)) : null,
+          kvRow('Environment', envText),
+          el('div', { class: 'hint', style: 'margin-top:10px' },
+            'Instances inherit all of this at launch; edits reach running instances on their next run.'),
+        ),
+        el('div', { class: 'panel' },
+          el('h3', {}, 'Default settings'),
+          el('div', { class: 'hint' }, 'Starting point for every new instance; each instance can override these in its Control Room.'),
+          settingsPane,
+          el('h3', { style: 'margin-top:18px' }, 'Spend across projects'),
+          spendPane,
+        ),
+        el('div', { class: 'panel span2' },
+          el('h3', {}, `Instances — ${kids.length}`),
+          kids.length
+            ? el('div', { class: 'instance-list' }, kids.map(instanceRow))
+            : el('div', { class: 'hint' }, 'None running. ▶ Launch instance starts one on a project.'),
+        ),
+      ),
+    )
+  );
+
+  // Runs and cost for this agent summed over every project (analytics is
+  // fleet-wide, so it is cached briefly — this page re-renders on every
+  // instance broadcast).
+  agentSpend(agent.id).then((row) => {
+    if (!spendPane.isConnected) return;
+    if (!row) { spendPane.replaceChildren(el('div', { class: 'hint' }, 'No runs recorded yet.')); return; }
+    spendPane.replaceChildren(
+      kvRow('Runs', `${row.runs}${row.failures ? ` · ${row.failures} failed` : ''}`),
+      kvRow('Spend', fmtCost(row.cost, row.estimated)),
+      row.avgMs ? kvRow('Avg run', fmtDur(row.avgMs)) : null,
+      pricing?.plan && typeof pricing.amount === 'number'
+        ? kvRow('Subscription', `${fmtMoney(pricing.amount, pricing.currency)}/${pricing.period === 'year' ? 'yr' : 'mo'}`) : null,
+    );
+  }).catch((err) => spendPane.replaceChildren(el('div', { class: 'hint' }, err.message)));
+
+  let settings;
+  try { settings = await api(`/api/agents/${encodeURIComponent(agent.id)}/settings`); }
+  catch (err) { settingsPane.replaceChildren(el('div', { class: 'hint' }, err.message)); return; }
+  settingsPane.replaceChildren(...settings.schema.map((field) => {
+    const save = async (value) => {
+      try {
+        await api(`/api/agents/${encodeURIComponent(agent.id)}/settings`, { method: 'PUT', body: { [field.key]: value } });
+        toast(`${field.label} default updated`);
+      } catch (err) { toast(err.message, true); }
+    };
+    let input;
+    if (field.type === 'text') {
+      input = el('input', { placeholder: field.placeholder || '' });
+      input.value = settings.values[field.key] ?? '';
+      input.addEventListener('change', () => save(input.value.trim()));
+    } else {
+      input = el('select', { onchange: () => save(input.value) },
+        (field.options || []).map((opt) =>
+          el('option', { value: opt.value, selected: settings.values[field.key] === opt.value ? '' : null }, opt.label)));
+    }
+    return el('div', { class: 'field' }, el('label', {}, field.label), input);
+  }));
+  if (!settings.schema.length) settingsPane.replaceChildren(el('div', { class: 'hint' }, 'This adapter has no settings.'));
+}
+
+let analyticsCache = { at: 0, promise: null };
+function agentSpend(agentId) {
+  if (Date.now() - analyticsCache.at > 10000 || !analyticsCache.promise) {
+    analyticsCache = { at: Date.now(), promise: api('/api/analytics') };
+  }
+  return analyticsCache.promise.then((data) => data.agents.find((a) => a.id === agentId) || null);
+}
+
+/* ── Instance page (Control Room) ────────────────────────────────── */
+
+// `agent` here is an instance: one live session of a registered agent on one
+// project. Its project is fixed at launch; the model is per instance.
 function renderAgentPage(agent) {
   const tabs = [
     ['chat', 'Chat'],
@@ -2315,15 +2678,19 @@ function renderAgentPage(agent) {
     ['control', 'Control Room'],
   ];
   const st = agent.status || {};
+  const def = getAgent(agent.agentId);
   main.replaceChildren(
     el('div', { class: 'agent-page' },
       el('header', { class: 'agent-header' },
         el('span', { class: `dot ${st.state || 'offline'}`, id: 'hdr-dot' }),
         el('h1', {}, agent.name),
+        el('a', {
+          class: 'hdr-chip', href: `#/agent/${encodeURIComponent(agent.agentId)}`,
+          style: `--agent-accent:${agent.accent || 'var(--accent)'}`, title: 'Registered agent',
+        }, el('span', { class: 'nav-agent-swatch' }), def?.name || agent.agent),
+        el('span', { class: 'hdr-chip', title: st.project?.path || '' }, '▣ ' + (st.project?.name || projName(agent.projectId))),
         el('span', { class: 'header-task', id: 'hdr-task' }, ...headerTaskNodes(st)),
-        el('select', { class: 'hdr-model', id: 'hdr-project', title: 'Project' },
-          el('option', {}, '▣ ' + (st.project?.name || 'default workspace'))),
-        el('select', { class: 'hdr-model', id: 'hdr-model', title: 'Model' },
+        el('select', { class: 'hdr-model', id: 'hdr-model', title: 'Model (this instance)' },
           el('option', {}, modelLabel(st))),
         el('div', { class: 'tabs' },
           tabs.map(([key, label]) =>
@@ -2344,35 +2711,7 @@ function renderAgentPage(agent) {
   else if (state.tab === 'workspace') renderWorkspace(agent, body);
   else renderControl(agent, body);
   populateModelSelect(agent);
-  populateProjectSelect(agent);
-  state.agentProj[agent.id] = st.project?.id || null;
   state.agentCid[agent.id] = st.cid || null;
-}
-
-// Header project dropdown — pointing the agent at a project (or the default
-// workspace). Switching saves the current session and resumes the one last
-// used for that project.
-function populateProjectSelect(agent) {
-  const sel = $('#hdr-project');
-  if (!sel || document.activeElement === sel) return;
-  const cur = agent.status?.project?.id || '';
-  sel.replaceChildren(
-    el('option', { value: '' }, '▣ default workspace'),
-    ...state.projects.map((p) =>
-      el('option', { value: p.id, selected: cur === p.id ? '' : null }, '▣ ' + p.name)),
-  );
-  sel.value = cur;
-  sel.onchange = async () => {
-    try {
-      await api(`/api/agents/${agent.id}/project`, {
-        method: 'POST',
-        body: { projectId: sel.value || null },
-      });
-    } catch (err) {
-      toast(err.message, true);
-      populateProjectSelect(agent);
-    }
-  };
 }
 
 // Fill the header model dropdown from the agent's settings schema; changing it
@@ -2382,7 +2721,7 @@ async function populateModelSelect(agent) {
   if (!sel || document.activeElement === sel) return;
   let settings;
   try {
-    settings = await api(`/api/agents/${agent.id}/settings`);
+    settings = await api(`/api/instances/${agent.id}/settings`);
   } catch {
     return;
   }
@@ -2399,7 +2738,7 @@ async function populateModelSelect(agent) {
   );
   sel.onchange = async () => {
     try {
-      await api(`/api/agents/${agent.id}/settings`, { method: 'PUT', body: { model: sel.value } });
+      await api(`/api/instances/${agent.id}/settings`, { method: 'PUT', body: { model: sel.value } });
       toast(`Model set to ${sel.options[sel.selectedIndex].textContent} — applies from the next message`);
     } catch (err) {
       toast(err.message, true);
@@ -2418,42 +2757,33 @@ function headerTaskNodes(st) {
 }
 
 function onStatusChanged(agentId) {
-  const agent = getAgent(agentId);
+  const agent = getInstance(agentId);
   if (!agent) return;
   const st = agent.status || {};
-  const projChanged = (st.project?.id || null) !== (state.agentProj[agentId] ?? (st.project?.id || null));
   const cidChanged = (st.cid || null) !== (state.agentCid[agentId] ?? (st.cid || null));
-  state.agentProj[agentId] = st.project?.id || null;
   state.agentCid[agentId] = st.cid || null;
-  if (projChanged) {
-    state.wsFile[agentId] = { dir: '', selected: null };
-    state.fileTree[agentId] = null;
-  }
 
-  if (currentAgentId() === agentId) {
+  if (currentInstanceId() === agentId) {
     const dot = $('#hdr-dot');
     if (dot) dot.className = `dot ${st.state || 'offline'}`;
     const task = $('#hdr-task');
     if (task) task.replaceChildren(...headerTaskNodes(st));
     const body = $('#agent-body');
     if (state.tab === 'chat') {
-      if ((projChanged || cidChanged) && body) renderChat(agent, body);
+      if (cidChanged && body) renderChat(agent, body);
       else {
         updateWorkingBar(agent);
         updateQueueBar(agent);
       }
     }
-    if (state.tab === 'workspace' && projChanged && body) renderWorkspace(agent, body);
-    if (state.tab === 'git' && projChanged && body) renderGit(agent, body);
     if (state.tab === 'control') refreshControlInfo(agent);
     populateModelSelect(agent);
-    populateProjectSelect(agent);
   } else if (onBoardPage()) {
     renderBoard();
-  } else if (onFleetPage()) {
-    // New agent (spawned by a fleet launch) or state change — refetch lanes.
-    scheduleFleetRefresh();
-  } else if (!currentAgentId() && !onOtherPage()) {
+  } else if (currentAgentId()) {
+    const a = getAgent(currentAgentId());
+    if (a) renderAgentDetail(a);
+  } else if (!currentInstanceId() && !onOtherPage()) {
     renderHome();
   }
 }
@@ -2541,7 +2871,7 @@ function fmtElapsed(ms) {
 // chat view has moved on — following the prompt library's append pattern.
 function insertComposerText(agentId, text) {
   const input = $('#composer-input');
-  if (input && currentAgentId() === agentId) {
+  if (input && currentInstanceId() === agentId) {
     input.value = input.value ? input.value.replace(/\s+$/, '') + '\n' + text : text;
     input.dispatchEvent(new Event('input'));   // re-grow + re-save draft
     input.focus();
@@ -2555,7 +2885,7 @@ function insertComposerText(agentId, text) {
 function updateMicBtns() {
   const btn = $('.mic-btn');
   if (!btn) return;
-  const v = state.voice && state.voice.agentId === currentAgentId() ? state.voice : null;
+  const v = state.voice && state.voice.agentId === currentInstanceId() ? state.voice : null;
   if (!v) {
     btn.classList.remove('rec');
     btn.textContent = '🎤';
@@ -2668,7 +2998,7 @@ function startDictate(agent) {
   const input = $('#composer-input');
   const v = {
     backend: 'dictate', agentId: agent.id, startedAt: Date.now(), rec,
-    base: input && currentAgentId() === agent.id ? input.value : (state.drafts[agent.id] || ''),
+    base: input && currentInstanceId() === agent.id ? input.value : (state.drafts[agent.id] || ''),
     final: '', interim: '', expected: null, discard: false,
   };
   rec.onresult = (e) => {
@@ -2706,7 +3036,7 @@ function startDictate(agent) {
 // is there now instead of resurrecting what we last wrote.
 function applyDictation(v, finalOnly) {
   const live = $('#composer-input');
-  const inView = live && currentAgentId() === v.agentId;
+  const inView = live && currentInstanceId() === v.agentId;
   const current = inView ? live.value : (state.drafts[v.agentId] || '');
   if (current !== v.expected) {
     v.base = current;
@@ -2799,7 +3129,7 @@ function micButton(agent) {
       const v = state.voice;
       if (v) {
         // One session at a time: clicking again finishes it.
-        if (v.agentId !== agent.id) return toast(`Already ${v.backend === 'whisper' ? 'recording' : 'dictating'} for another agent`, true);
+        if (v.agentId !== agent.id) return toast(`Already ${v.backend === 'whisper' ? 'recording' : 'dictating'} for another instance`, true);
         stopVoice();
         return;
       }
@@ -2831,7 +3161,7 @@ function renderChat(agent, body) {
     const cached = state.skillsCache[agent.id];
     if (cached && Date.now() - cached.at < 30000) return cached.items;
     let items = [];
-    try { items = await api(`/api/agents/${agent.id}/skills`); } catch {}
+    try { items = await api(`/api/instances/${agent.id}/skills`); } catch {}
     state.skillsCache[agent.id] = { at: Date.now(), items };
     return items;
   }
@@ -2949,7 +3279,7 @@ function renderChat(agent, body) {
         reader.readAsDataURL(file);
       });
       const dataBase64 = String(dataUrl).split(',')[1] || '';
-      const saved = await api(`/api/agents/${agent.id}/attach`, {
+      const saved = await api(`/api/instances/${agent.id}/attach`, {
         method: 'POST',
         body: { name: file.name, dataBase64 },
       });
@@ -3014,7 +3344,7 @@ function renderChat(agent, body) {
       if (agent.status?.state === 'working' &&
           !confirm('The agent is mid-run. Start a new session anyway?')) return;
       try {
-        await api(`/api/agents/${agent.id}/session/clear`, { method: 'POST' });
+        await api(`/api/instances/${agent.id}/session/clear`, { method: 'POST' });
         toast('New session started');
       } catch (err) {
         toast(err.message, true);
@@ -3039,7 +3369,7 @@ function renderChat(agent, body) {
     input.style.height = 'auto';
     state.drafts[agent.id] = '';
     try {
-      const result = await api(`/api/agents/${agent.id}/chat`, { method: 'POST', body: { message: text } });
+      const result = await api(`/api/instances/${agent.id}/chat`, { method: 'POST', body: { message: text } });
       if (result.queued) toast(`Queued — position ${result.position}`);
       staged.length = 0;
       renderAttachChips(agent);
@@ -3099,7 +3429,7 @@ function renderChat(agent, body) {
   }
   if (!events.length) {
     log.append(el('div', { class: 'meta-line' },
-      `fresh session in ${agent.status?.project?.name || 'default workspace'} — send a message to begin`));
+      `fresh session in ${agent.status?.project?.name || projName(agent.projectId)} — send a message to begin`));
   }
   updateWorkingBar(agent);
   updateQueueBar(agent);
@@ -3145,7 +3475,7 @@ function updateWorkingBar(agent) {
         st.run ? runClock(st.run, 'sm') : null,
         el('button', {
           class: 'btn sm danger stop-btn',
-          onclick: () => api(`/api/agents/${agent.id}/stop`, { method: 'POST' }).catch((e) => toast(e.message, true)),
+          onclick: () => api(`/api/instances/${agent.id}/stop`, { method: 'POST' }).catch((e) => toast(e.message, true)),
         }, 'Abort'),
       ),
       subs.length ? el('div', { class: 'subagent-row' },
@@ -3191,7 +3521,7 @@ function updateQueueBar(agent) {
             class: 'btn sm danger',
             onclick: async () => {
               try {
-                await api(`/api/agents/${agent.id}/queue/${task.id}`, { method: 'DELETE' });
+                await api(`/api/instances/${agent.id}/queue/${task.id}`, { method: 'DELETE' });
               } catch (err) { toast(err.message, true); }
             },
           }, '✕'),
@@ -3206,7 +3536,7 @@ async function moveQueueTask(agent, index, delta) {
   const [task] = queue.splice(index, 1);
   queue.splice(index + delta, 0, task);
   try {
-    await api(`/api/agents/${agent.id}/queue/reorder`, {
+    await api(`/api/instances/${agent.id}/queue/reorder`, {
       method: 'POST',
       body: { order: queue.map((t) => t.id) },
     });
@@ -3216,7 +3546,7 @@ async function moveQueueTask(agent, index, delta) {
 }
 
 function onAgentEvent(agentId, event) {
-  if (currentAgentId() !== agentId) return;
+  if (currentInstanceId() !== agentId) return;
   if (state.tab === 'chat') {
     const log = $('#chat-log');
     if (!log) return;
@@ -3233,7 +3563,7 @@ function onAgentEvent(agentId, event) {
     const cids = new Set((state.histories[agentId] || []).map((e) => e.cid || 's-0'));
     if (body && body.dataset.sessCount !== String(cids.size)) {
       // A new session appeared (e.g. "New session" was clicked) — refresh the list.
-      const agent = getAgent(agentId);
+      const agent = getInstance(agentId);
       if (agent) renderSessions(agent, body);
     } else if (log && state.sessionSel[agentId] === event.cid) {
       const node = renderEvent(event);
@@ -3243,7 +3573,7 @@ function onAgentEvent(agentId, event) {
   } else if (state.tab === 'git') {
     // A finished run likely changed files — refresh the review pane.
     if (event.type === 'result') {
-      const agent = getAgent(agentId);
+      const agent = getInstance(agentId);
       const body = $('#agent-body');
       if (agent && body) renderGit(agent, body);
     }
@@ -3631,7 +3961,7 @@ async function renderGit(agent, body) {
   body.replaceChildren(el('div', { class: 'ws-empty' }, 'Reading git status…'));
   let st;
   try {
-    st = await api(`/api/agents/${agent.id}/git/status`);
+    st = await api(`/api/instances/${agent.id}/git/status`);
   } catch (err) {
     body.replaceChildren(el('div', { class: 'ws-empty' }, 'Git error: ' + err.message));
     return;
@@ -3646,7 +3976,7 @@ async function renderGit(agent, body) {
           class: 'btn primary',
           onclick: async () => {
             try {
-              await api(`/api/agents/${agent.id}/git/init`, { method: 'POST', body: {} });
+              await api(`/api/instances/${agent.id}/git/init`, { method: 'POST', body: {} });
               toast('Repository initialized');
               renderGit(agent, body);
             } catch (err) { toast(err.message, true); }
@@ -3661,8 +3991,8 @@ async function renderGit(agent, body) {
   let branchInfo = { branches: [], current: st.branch };
   try {
     [history, branchInfo] = await Promise.all([
-      api(`/api/agents/${agent.id}/git/log?limit=15`),
-      api(`/api/agents/${agent.id}/git/branches`),
+      api(`/api/instances/${agent.id}/git/log?limit=15`),
+      api(`/api/instances/${agent.id}/git/branches`),
     ]);
   } catch {}
 
@@ -3686,7 +4016,7 @@ async function renderGit(agent, body) {
     diffPane.replaceChildren(el('div', { class: 'ws-empty' }, 'Loading diff…'));
     try {
       const q = pathOrNull ? '?path=' + encodeURIComponent(pathOrNull) : '';
-      const data = await api(`/api/agents/${agent.id}/git/diff${q}`);
+      const data = await api(`/api/instances/${agent.id}/git/diff${q}`);
       diffPane.replaceChildren(
         el('div', { class: 'sess-detail-head' },
           el('span', {}, pathOrNull || 'All uncommitted changes'),
@@ -3705,7 +4035,7 @@ async function renderGit(agent, body) {
     markSelected();
     diffPane.replaceChildren(el('div', { class: 'ws-empty' }, 'Loading commit…'));
     try {
-      const data = await api(`/api/agents/${agent.id}/git/show?hash=` + hash);
+      const data = await api(`/api/instances/${agent.id}/git/show?hash=` + hash);
       diffPane.replaceChildren(
         el('div', { class: 'sess-detail-head' },
           el('span', {}, 'commit ' + hash),
@@ -3728,7 +4058,7 @@ async function renderGit(agent, body) {
   }
   branchSel.onchange = async () => {
     try {
-      await api(`/api/agents/${agent.id}/git/checkout`, { method: 'POST', body: { name: branchSel.value } });
+      await api(`/api/instances/${agent.id}/git/checkout`, { method: 'POST', body: { name: branchSel.value } });
       toast('Switched to ' + branchSel.value);
       refresh();
     } catch (err) { toast(err.message, true); refresh(); }
@@ -3740,7 +4070,7 @@ async function renderGit(agent, body) {
     disabled: st.changes.length ? null : '',
     onclick: async () => {
       try {
-        const r = await api(`/api/agents/${agent.id}/git/commit`, { method: 'POST', body: { message: commitMsg.value } });
+        const r = await api(`/api/instances/${agent.id}/git/commit`, { method: 'POST', body: { message: commitMsg.value } });
         toast(`Committed ${r.hash}`);
         refresh();
       } catch (err) { toast(err.message, true); }
@@ -3758,7 +4088,7 @@ async function renderGit(agent, body) {
               const name = prompt('New branch name:');
               if (!name) return;
               try {
-                await api(`/api/agents/${agent.id}/git/branch`, { method: 'POST', body: { name } });
+                await api(`/api/instances/${agent.id}/git/branch`, { method: 'POST', body: { name } });
                 toast('Created branch ' + name);
                 refresh();
               } catch (err) { toast(err.message, true); }
@@ -3798,7 +4128,7 @@ async function renderGit(agent, body) {
             e.stopPropagation();
             if (!confirm(`Discard changes to ${change.path}?${change.untracked ? '\n(This deletes the untracked file.)' : ''}`)) return;
             try {
-              await api(`/api/agents/${agent.id}/git/discard`, { method: 'POST', body: { path: change.path } });
+              await api(`/api/instances/${agent.id}/git/discard`, { method: 'POST', body: { path: change.path } });
               toast('Discarded ' + change.path);
               refresh();
             } catch (err) { toast(err.message, true); }
@@ -3863,7 +4193,7 @@ function fileTree(agent, { onOpen, onAdd } = {}) {
   async function fill(rel, depth, into) {
     let data;
     try {
-      data = await api(`/api/agents/${agent.id}/files?path=${encodeURIComponent(rel)}`);
+      data = await api(`/api/instances/${agent.id}/files?path=${encodeURIComponent(rel)}`);
     } catch (err) {
       into.replaceChildren(note(depth, err.message));
       return;
@@ -3953,7 +4283,7 @@ function renderWorkspace(agent, body) {
               const name = prompt('New file path (relative to workspace):');
               if (!name) return;
               try {
-                await api(`/api/agents/${agent.id}/file`, { method: 'PUT', body: { path: name, content: '' } });
+                await api(`/api/instances/${agent.id}/file`, { method: 'PUT', body: { path: name, content: '' } });
                 await tree.reload();
                 openFile(name);
               } catch (err) { toast(err.message, true); }
@@ -3981,7 +4311,7 @@ function renderWorkspace(agent, body) {
     tree.select(relPath);
     let data;
     try {
-      data = await api(`/api/agents/${agent.id}/file?path=${encodeURIComponent(relPath)}`);
+      data = await api(`/api/instances/${agent.id}/file?path=${encodeURIComponent(relPath)}`);
     } catch (err) {
       toast(err.message, true);
       ws.selected = null;
@@ -4010,7 +4340,7 @@ function renderWorkspace(agent, body) {
       class: 'btn sm primary',
       onclick: async () => {
         try {
-          await api(`/api/agents/${agent.id}/file`, {
+          await api(`/api/instances/${agent.id}/file`, {
             method: 'PUT',
             body: { path: relPath, content: ta.value },
           });
@@ -4035,7 +4365,7 @@ function renderWorkspace(agent, body) {
 async function renderControl(agent, body) {
   let settings;
   try {
-    settings = await api(`/api/agents/${agent.id}/settings`);
+    settings = await api(`/api/instances/${agent.id}/settings`);
   } catch {
     settings = { schema: [], values: {} };
   }
@@ -4043,7 +4373,7 @@ async function renderControl(agent, body) {
   const fields = settings.schema.map((field) => {
     const saveValue = async (value) => {
       try {
-        await api(`/api/agents/${agent.id}/settings`, { method: 'PUT', body: { [field.key]: value } });
+        await api(`/api/instances/${agent.id}/settings`, { method: 'PUT', body: { [field.key]: value } });
         toast(`${field.label} updated`);
       } catch (err) { toast(err.message, true); }
     };
@@ -4069,7 +4399,8 @@ async function renderControl(agent, body) {
       el('div', { class: 'control-grid' },
         el('div', { class: 'panel' },
           el('h3', {}, 'Configuration'),
-          fields.length ? fields : el('div', { class: 'ws-empty' }, 'No settings for this agent'),
+          el('div', { class: 'hint' }, 'Overrides for this instance; new instances start from the agent\'s defaults.'),
+          fields.length ? fields : el('div', { class: 'ws-empty' }, 'No settings for this adapter'),
         ),
         el('div', { class: 'panel' },
           el('h3', {}, 'Session'),
@@ -4077,36 +4408,34 @@ async function renderControl(agent, body) {
           el('div', { class: 'btn-row', style: 'margin-top:14px' },
             el('button', {
               class: 'btn danger',
-              onclick: () => api(`/api/agents/${agent.id}/stop`, { method: 'POST' })
+              onclick: () => api(`/api/instances/${agent.id}/stop`, { method: 'POST' })
                 .then(() => toast('Abort signal sent'))
                 .catch((e) => toast(e.message, true)),
             }, 'Abort current run'),
             el('button', {
               class: 'btn',
-              onclick: () => api(`/api/agents/${agent.id}/session/clear`, { method: 'POST' })
+              onclick: () => api(`/api/instances/${agent.id}/session/clear`, { method: 'POST' })
                 .then(() => toast('Session cleared'))
                 .catch((e) => toast(e.message, true)),
             }, 'New session'),
             el('button', {
               class: 'btn',
               onclick: () => {
-                if (!confirm('Clear all chat history for this agent?')) return;
-                api(`/api/agents/${agent.id}/history/clear`, { method: 'POST' })
+                if (!confirm('Delete this instance\'s conversations from the project history?')) return;
+                api(`/api/instances/${agent.id}/history/clear`, { method: 'POST' })
                   .then(() => toast('History cleared'))
                   .catch((e) => toast(e.message, true));
               },
             }, 'Clear history'),
-            agent.dynamic ? el('button', {
+            el('button', {
               class: 'btn danger',
-              onclick: async () => {
-                if (!confirm(`Retire agent "${agent.name}"?\nIts chat history is deleted; workspace files stay on disk.`)) return;
-                try {
-                  await api('/api/agents/' + agent.id, { method: 'DELETE' });
-                  toast('Agent retired');
-                  location.hash = '#/';
-                } catch (err) { toast(err.message, true); }
+              disabled: agent.status?.state === 'working' ? '' : null,
+              title: agent.status?.state === 'working' ? 'Abort the run or wait for it to finish first' : 'Close this instance; its conversations stay in the project history',
+              onclick: () => {
+                if (!confirm(`Close "${agent.name}"?\nIts conversations stay in ${projName(agent.projectId)}'s history.`)) return;
+                closeInstance(agent);
               },
-            }, 'Retire agent') : null,
+            }, 'Close instance'),
           ),
         ),
         el('div', { class: 'panel span2' },
@@ -4129,6 +4458,8 @@ function refreshControlInfo(agent) {
   if (!info) return;
   const st = agent.status || {};
   info.replaceChildren(
+    kv('Agent', agent.agent || agent.agentId),
+    kv('Project', st.project?.name || projName(agent.projectId)),
     kv('State', st.state || 'offline'),
     kv('Model', modelLabel(st)),
     kv('Session ID', st.sessionId ? st.sessionId.slice(0, 18) + '…' : 'none (fresh)'),
@@ -4178,8 +4509,9 @@ setInterval(() => {
 
 (async function boot() {
   try {
-    [state.agents, state.projects] = await Promise.all([
+    [state.agents, state.instances, state.projects] = await Promise.all([
       api('/api/agents'),
+      api('/api/instances'),
       api('/api/projects'),
     ]);
   } catch (err) {

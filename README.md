@@ -14,8 +14,13 @@ Then open **http://localhost:1969** (Apollo 11 vintage — override with `PORT=x
 
 ## What you get
 
-- **Dashboard** — live fleet view: which agents are online, working, or offline,
-  what each one is doing right now, run counts and session spend. Updates in
+- **Registered agents and instances** — an *agent* is a definition (type,
+  models, pricing, env) and never chats; an *instance* is a live session of
+  one agent working in one project. Launch as many instances of an agent as
+  you like, each on its own project; close them when idle. The sidebar lists
+  agents with their instances nested beneath.
+- **Dashboard** — one card per registered agent with its instances grouped
+  inside: what each is doing right now, run clock, queue, spend. Updates in
   real time over WebSockets.
 - **Live CLI sessions** — the dashboard also detects Claude Code tabs you run
   yourself in any terminal (wrapper aliases that set `ANTHROPIC_BASE_URL`
@@ -31,15 +36,15 @@ Then open **http://localhost:1969** (Apollo 11 vintage — override with `PORT=x
   successful runs on the same project (falling back to the agent, then the
   whole fleet), refined as tool calls come in. Hover the clock for the basis.
   It's informational only — nothing alerts when a run overshoots.
-- **Per-agent Chat** — a streaming chat panel. For Claude Code you see its
+- **Per-instance Chat** — a streaming chat panel. For Claude Code you see its
   tool calls (⚙ chips) and results (✓ chips) live as it works.
-- **Per-agent Workspace** — a folder tree of the agent's working directory
-  (`workspaces/<agent-id>/`, or the project root when a project is selected):
+- **Per-instance Workspace** — a folder tree of the instance's project root:
   expand folders in place, view, create, and edit files. "💬 Ask in chat" on an
-  open file adds it to the next chat message. The agent runs with this
+  open file adds it to the next chat message. The instance runs with this
   directory as its cwd, so anything it builds shows up here.
-- **Per-agent Control Room** — model & permission-mode settings, session info,
-  abort / new session / clear history, and a raw telemetry event stream.
+- **Per-instance Control Room** — model & permission-mode overrides, session
+  info, abort / new session / clear history / close instance, and a raw
+  telemetry event stream.
 
 ## Chat features
 
@@ -71,34 +76,51 @@ Then open **http://localhost:1969** (Apollo 11 vintage — override with `PORT=x
 - **Session export** — in a session's detail view: ⧉ Copy or ⬇ Export the
   transcript as Markdown.
 
-## Multiple agents & the task queue
+## Agents, instances & the task queue
 
-- **Spawn agents from the UI** — "+ New agent" in the sidebar (or the dashed
-  card on the dashboard). Each instance gets its own sessions, project pointer,
-  workspace (`workspaces/<id>/`), and settings. UI-created agents live in
-  `data/agents.json`; retire one from its Control Room (history is deleted,
-  workspace files are kept). Agents in `agents.config.js` can't be retired
-  from the UI.
-- **Task queue** — messages sent while an agent is busy queue up and run in
+- **Registered agents** live in `data/agents.json`, seeded once from
+  `agents.config.js` on first boot (the file is the seed for fresh installs;
+  after that the dashboard owns the registry and a removed built-in stays
+  gone). "+ Register agent" at the bottom of the sidebar opens the definition
+  form: name, type, description, accent, models, billing (subscription and/or
+  rate card) and env. An agent's page (click its name) shows the same
+  definition with ✎ Edit, its default settings, spend across projects, running
+  instances, and Remove (refused while instances exist). Edits reach running
+  instances on their next run; a pricing change re-prices stored results.
+- **Launch an instance** — ▶ on an agent's sidebar row (or its card / page)
+  expands a launcher: pick the project it works in and an optional first
+  prompt. Launching starts the instance, sends the prompt, and lands you on its
+  Control Room with the run already streaming. Instances are named
+  `<Project> · <Agent>`, inherit the agent's env/models/pricing, and survive
+  server restarts idle. They never auto-retire — close one with ✕ on its
+  sidebar row or "Close instance" in its Control Room (refused while working).
+  Persisted in `data/instances.json`.
+- **Task queue** — messages sent while an instance is busy queue up and run in
   order automatically. The queue shows above the composer (reorder with ↑/↓,
   cancel with ✕), survives server restarts, and keeps draining after an
   aborted run.
 
 ## Analytics
 
-The **Analytics** page rolls up the retained event history (last 1000
-events/agent):
+The **Analytics** page rolls up the retained event history (last 2000
+events per project):
 
-- Stat tiles (spend today / 7 days, runs, success rate, avg run) and a daily
-  budget bar when a cost threshold is set on the Alerts page.
-- Cost-by-day chart (14 days, hover for per-agent breakdown), cost by agent,
-  cost by project.
+- Stat tiles (spend today / 7 days, subscriptions per month, runs, success
+  rate, avg run) and a daily budget bar when a cost threshold is set on the
+  Alerts page.
+- Subscriptions table: every agent on a flat-rate plan with its cost, monthly
+  equivalent and renewal countdown (amber inside a week). A reminder goes out
+  on Telegram/email the day before each renewal (toggle on the Alerts page),
+  and the date rolls forward one period once it has passed.
+- Cost-by-day chart (14 days, hover for per-agent breakdown), cost by
+  registered agent (summed over every project and instance), cost by project.
 - Run outcomes table: runs, failures, success %, avg/longest duration, tokens
-  in/out, cost per agent.
+  in/out, cost per registered agent.
 - Project health cards: git branch + uncommitted count, runs/cost, open board
-  cards, agents pointed there, last activity.
-- Global activity feed across all agents (starts, finishes, failures, project
-  switches) — click a row to jump to that agent. Live-updates as runs happen.
+  cards, instances running there, last activity.
+- Global activity feed across every project (starts, finishes, failures) —
+  click a row to open the instance, or the conversation in the project's
+  history once the instance has been closed. Live-updates as runs happen.
 
 ## Alerts
 
@@ -123,21 +145,21 @@ Review → Done. Pick the project (or the default workspace) from the dropdown.
 
 - **+ Add card** in Backlog; click a card to edit or delete it. Cards persist
   in `data/tasks.json`.
-- **Dispatch**: drag a card onto an agent chip (top right), or use the card's
-  ▶ menu. Dispatching points the agent at the card's project (when idle — a
-  cross-project dispatch to a busy agent is refused), then runs the card's
-  title + description as the prompt, queueing if the agent is mid-run.
+- **Dispatch**: drag a card onto an instance chip (top right — the instances
+  running on this board's project), or use the card's ▶ menu. No instance on
+  the project yet? The chip row offers to launch one. The card's title +
+  description become the prompt, queueing if the instance is mid-run.
 - Cards follow their run automatically: **In progress** while running/queued,
   then **Review** when the run completes (badged `failed`/`stopped` when it
-  didn't succeed). 🗂 on a card jumps to the exact session that did the work;
+  didn't succeed). 🗂 on a card jumps to the exact conversation that did the
+  work (in the instance if it's still open, else in the project's history);
   ✓ marks it Done.
 - Drag between columns to move cards manually. Removing a project moves its
   cards to the default-workspace board.
 
 ## Git tab
 
-Each agent has a **Git** tab operating on its current workspace (the project
-root when one is selected):
+Each instance has a **Git** tab operating on its project root:
 
 - Changed files with status markers; click for a per-file diff, `∑ All changes`
   for the full uncommitted diff (staged + unstaged + untracked).
@@ -156,24 +178,28 @@ touched (hover for the list).
 ## Projects
 
 Projects are first-class: register any folder on disk (the **Projects** page in
-the sidebar — name, root path, description; `~` is expanded). Then point an
-agent at a project from the dropdown in the agent's header:
+the sidebar — name, root path, description; `~` is expanded). Every instance
+works in exactly one project, chosen at launch:
 
-- The agent runs with the project root as its working directory, so it picks up
-  that project's own `CLAUDE.md`, `.claude/` config, and memory automatically.
+- The instance runs with the project root as its working directory, so it
+  picks up that project's own `CLAUDE.md`, `.claude/` config, and memory
+  automatically.
 - The Workspace tab and the chat's 🗂 files panel browse the project root.
-- Each project keeps its own session per agent — switch away and back and the
-  agent resumes the conversation where it left off.
-- Removing a project only unregisters it; files on disk are never touched.
-- **🧠 History**: each project card shows how many *native* Claude Code
-  sessions exist for its folder (read from `~/.claude/projects/…`), and the
-  History button opens a full transcript browser — covering every session run
-  from that folder in any terminal, not just through this dashboard, plus a
-  "from parent folders" section for sessions opened in the repo's parent or a
-  monorepo root. Transcripts are read-only, exportable as Markdown.
+- **History belongs to the project.** Every conversation any instance runs
+  against a project is written to `data/history-<project>.json`, stamped with
+  the agent and instance that produced it. Closing an instance leaves its
+  conversations (and their costs) in the project's record.
+- Removing a project closes its instances (refused while one is working) and
+  only unregisters it; files on disk and the history file are never touched.
+- **🗂 Conversations**: each project card opens a browser of everything that
+  ran against it — Mission Control conversations first (agent, cost, duration,
+  failures; ACTIVE while an open instance is still in it), then the *native*
+  Claude Code sessions for its folder (read from `~/.claude/projects/…`,
+  covering every session run from that folder in any terminal, plus a "from
+  parent folders" section). Transcripts are read-only, exportable as Markdown.
 
-Project registrations live in `data/projects.json`, per-agent project/session
-pointers in `data/state.json`.
+Project registrations live in `data/projects.json`; instances (with their
+conversation pointers and queues) in `data/instances.json`.
 
 ## Fleet vault
 
@@ -250,8 +276,11 @@ risk first — it will act without asking).
 ## Claude Code as a harness for other models
 
 Any provider that speaks the Anthropic Messages API (z.ai GLM, Moonshot Kimi,
-DeepSeek, a local Ollama, …) can sit behind the `claude` binary. Add a second
-`claude-code` entry to `agents.config.js` with two extra fields:
+DeepSeek, a local Ollama, …) can sit behind the `claude` binary. Register a
+second `claude-code` agent with two extra fields — from the dashboard
+("+ Register agent", or ✎ Edit on an existing agent's page), or in
+`agents.config.js` for a fresh install (it is only read as the seed on first
+boot). The form's Models, Billing and Environment sections map onto these:
 
 ```js
 {
@@ -271,16 +300,20 @@ DeepSeek, a local Ollama, …) can sit behind the `claude` binary. Add a second
 - **`env`** is merged into the spawned CLI's environment. A value of
   `{ file: '~/path' }` is read from disk on every run, so secrets stay out of
   the config file (put the key in a `chmod 600` file). If the file is missing
-  or empty the run fails immediately with a clear error in the chat. Env values
-  are never sent to the browser — the agent list only shows which keys are set.
+  or empty the run fails immediately with a clear error in the chat. The
+  dashboard form stores the path, never the token; a plain value under a
+  secret-looking key (token / key / password …) is masked in the browser and
+  kept unless you type a replacement.
 - **`models`** replaces the Sonnet/Opus/Haiku choices in the Control Room and
   header dropdown; the value goes to `claude --model`. Map the built-in aliases
   with `ANTHROPIC_DEFAULT_*_MODEL` too, since sub-agents still use them.
 
 - **`pricing`** fixes cost tracking. Claude Code prices every run at Anthropic
   rates whatever the backend, so declare how the provider really bills:
-  `{ plan: 'GLM Coding Plan', monthly: 18 }` for a flat subscription (runs
-  record $0 and the chat shows the plan name), or
+  `{ plan: 'GLM Coding Plan', amount: 18, currency: 'USD', period: 'month',
+  renewsOn: '2026-10-01' }` for a flat subscription (runs record $0, the chat
+  shows the plan name, Analytics lists it as a line item and reminds you the
+  day before it renews — `monthly: 18` from older configs still works), or
   `{ perMillion: { input, output, cacheRead, cacheWrite } }` in USD per
   million tokens for pay-as-you-go APIs. Give both and runs still bill $0, but
   each result also carries `estimated_cost_usd` — the same tokens at list
@@ -291,14 +324,16 @@ DeepSeek, a local Ollama, …) can sit behind the `claude` binary. Add a second
   history is re-priced on startup, so a config change applies retroactively.
   The CLI's own estimate is kept on each result as `reported_cost_usd`.
 
-Each such agent gets its own workspace, session history, and settings, so an
-Anthropic-backed and a GLM-backed Claude Code can run side by side. Commented
-examples for Kimi, DeepSeek and Ollama are in `agents.config.js`.
+Every instance of such an agent inherits its env, models and pricing at
+launch, so an Anthropic-backed and a GLM-backed Claude Code can run side by
+side on the same project. Commented examples for Kimi, DeepSeek and Ollama are
+in `agents.config.js`.
 
 ## Agent types
 
-Four adapters ship in `lib/adapters/`; the "+ New agent" type dropdown is fed
-by the registry, and an agent whose CLI isn't installed simply shows offline:
+Four adapters ship in `lib/adapters/`; the "+ Register agent" type dropdown is
+fed by the registry, and an agent whose CLI isn't installed shows as
+unavailable (its instances can't run until it is):
 
 - **Claude Code** — `claude -p` streaming JSON; live token streaming, session
   resume, sub-agent visibility (Task fan-out shows as ⑂ chips while running).
@@ -325,28 +360,28 @@ by the registry, and an agent whose CLI isn't installed simply shows offline:
 
 2. **Register the type** in `lib/adapters/index.js`.
 
-3. **Add a config entry** in `agents.config.js`:
+3. **Register an agent of that type** — "+ Register agent" in the sidebar, or
+   a seed entry in `agents.config.js` for fresh installs:
 
    ```js
    { id: 'my-agent', name: 'My Agent', type: 'my-agent',
      description: 'What it does', accent: '#5eb0ff' }
    ```
 
-4. Restart the server. The agent appears on the dashboard with its own chat,
-   workspace, and control room — no frontend changes needed.
+4. Launch an instance of it on a project. It gets chat, workspace, git and a
+   control room — no frontend changes needed.
 
 ## Layout
 
 ```
 server.js            Express + WebSocket server, JSON API
-agents.config.js     Agent registry
-lib/agent-manager.js Wires adapters to history + broadcasts
+agents.config.js     Seed registry (copied into data/agents.json on first boot)
+lib/agent-manager.js Registry + instances + project histories, wired to adapters
 lib/adapters/        One adapter per agent type
 lib/vault.js         Fleet vault core (settings, init, read/write, preamble)
 lib/vault-mcp.js     Stdio MCP server agents get at spawn
 lib/mc-notes.js      Distills ROADMAP.md planning rounds into `_mc/` vault notes
 public/              The dashboard UI (vanilla JS, no build step)
-workspaces/          One working directory per agent
-data/                Chat history + settings (gitignore-able)
+data/                Registry, instances, per-project history, settings (gitignored)
 ../fleet-vault/      The shared vault (own git repo, outside this one)
 ```

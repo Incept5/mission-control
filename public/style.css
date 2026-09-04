@@ -86,6 +86,46 @@ body {
   cursor: pointer;
 }
 .nav-add:hover { border-color: var(--accent); }
+#agent-nav { flex: 1; min-height: 0; overflow-y: auto; }
+.nav-empty { padding: 8px 18px; font-size: 12px; color: var(--text-faint); }
+
+/* Registered agent rows with their instances nested beneath (Round 5). */
+.nav-agent { margin-bottom: 2px; }
+.nav-agent-row { padding: 6px 6px 6px 4px; gap: 6px; cursor: default; }
+.nav-agent.unavailable .nav-agent-link { opacity: .55; }
+.nav-fold, .nav-launch-btn, .nav-close {
+  background: transparent; border: none; cursor: pointer;
+  color: var(--text-faint);
+  font-family: var(--mono); font-size: 11px;
+  width: 18px; height: 18px; line-height: 18px; text-align: center;
+  border-radius: 5px; padding: 0; flex-shrink: 0;
+}
+.nav-fold:hover, .nav-launch-btn:hover, .nav-close:hover { color: var(--text); background: var(--panel); }
+.nav-launch-btn { color: var(--accent); }
+.nav-launch-btn.active { background: var(--panel); color: var(--text); }
+.nav-agent-link {
+  flex: 1; min-width: 0;
+  display: flex; align-items: center; gap: 8px;
+  color: inherit; text-decoration: none;
+  font-weight: 500;
+}
+.nav-agent-link:hover .nav-agent-name { color: var(--text); }
+.nav-agent-swatch {
+  width: 8px; height: 8px; border-radius: 2px; flex-shrink: 0;
+  background: var(--agent-accent, var(--accent));
+}
+.nav-count {
+  font-family: var(--mono); font-size: 10px; color: var(--text-faint);
+  border: 1px solid var(--border); border-radius: 10px; padding: 1px 6px;
+  flex-shrink: 0;
+}
+.nav-count.working { color: var(--amber); border-color: rgba(251, 191, 36, .35); }
+.nav-instance { margin-left: 22px; padding: 6px 6px 6px 10px; gap: 8px; }
+.nav-instance .nav-close { opacity: 0; }
+.nav-instance:hover .nav-close { opacity: 1; }
+.nav-close:disabled { cursor: not-allowed; color: var(--text-faint); background: transparent; opacity: .4 !important; }
+.nav-close:hover:not(:disabled) { color: var(--red); }
+.nav-agent .nav-launch-form { margin: 2px 8px 6px 26px; }
 .nav-queue-badge {
   font-family: var(--mono); font-size: 10px;
   color: var(--amber);
@@ -245,6 +285,47 @@ body {
   display: flex; gap: 16px;
   font-family: var(--mono); font-size: 11px; color: var(--text-faint);
 }
+
+/* Registered-agent card with its instances grouped inside (Round 5). */
+.agent-card-group { cursor: default; }
+.agent-card-group:hover { transform: none; box-shadow: none; }
+.agent-card-group .agent-card-head { color: inherit; text-decoration: none; }
+.agent-card-group .agent-card-head:hover .agent-card-name { color: var(--accent); }
+.agent-card-foot { margin-top: 12px; }
+.agent-card-foot .btn { text-decoration: none; }
+.instance-list { display: flex; flex-direction: column; gap: 6px; }
+.instance-row {
+  display: flex; align-items: flex-start; gap: 10px;
+  padding: 9px 11px;
+  background: var(--panel-2);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  color: inherit; text-decoration: none;
+  transition: border-color .15s;
+}
+.instance-row:hover { border-color: var(--border-bright); }
+.instance-row .dot { margin-top: 4px; }
+.instance-row-main { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 3px; }
+.instance-row-name { font-size: 13px; font-weight: 600; }
+.instance-row-task {
+  font-family: var(--mono); font-size: 11px; color: var(--amber);
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.instance-row-task.idle { color: var(--text-faint); }
+.instance-row-meta {
+  display: flex; flex-direction: column; align-items: flex-end; gap: 2px;
+  font-family: var(--mono); font-size: 10.5px; color: var(--text-faint);
+  white-space: nowrap;
+}
+.hdr-chip {
+  display: inline-flex; align-items: center; gap: 6px;
+  font-family: var(--mono); font-size: 11px; color: var(--text-dim);
+  border: 1px solid var(--border-bright); border-radius: 20px;
+  padding: 3px 9px; text-decoration: none; white-space: nowrap;
+}
+a.hdr-chip:hover { color: var(--text); border-color: var(--accent); }
+.kb-agent-launch { cursor: pointer; color: var(--accent); border-style: dashed; font-family: var(--sans); }
+.kb-agent-launch:hover { border-color: var(--accent); }
 
 /* ── Agent page ──────────────────────────────────────────────────── */
 .agent-page { display: flex; flex-direction: column; height: 100vh; }
@@ -1161,81 +1242,89 @@ body {
 .vault-diff { width: min(860px, 92vw); max-height: 84vh; }
 .vault-diff-body { flex: 1; overflow: auto; padding: 0; }
 
-/* ── Fleet page (M17) ────────────────────────────────────────────── */
+/* ── Home header ─────────────────────────────────────────────────── */
 .home-head { display: flex; align-items: flex-end; justify-content: space-between; gap: 12px; }
-.fleet-hint { color: var(--text-faint); font-size: 12px; margin: -6px 0 12px; max-width: 720px; }
-.fleet-row { display: flex; gap: 8px; margin-bottom: 8px; }
-.fleet-row-proj { width: 190px; flex: none; }
-.fleet-row-type { width: 150px; flex: none; }
-.fleet-row-prompt {
-  flex: 1; min-width: 0;
+
+/* ── New agent launcher (sidebar, M18) ───────────────────────────── */
+/* Expands in place under the Agents list. Kept compact: the sidebar is
+   240px, so the fields stack full-width and the prompt is a short textarea. */
+.nav-launch { margin: 2px 8px 8px; }
+.nav-launch .nav-add { width: 100%; margin: 0; }
+.nav-launch-form {
+  display: flex; flex-direction: column; gap: 6px;
+  margin-top: 6px; padding: 8px;
   background: var(--panel-2);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+}
+.nav-launch-form.hidden { display: none; }
+.nav-launch-form .hdr-model { width: 100%; max-width: none; }
+.launcher-input {
+  width: 100%;
+  background: var(--panel);
   border: 1px solid var(--border-bright);
   border-radius: 8px;
   color: var(--text);
-  font-family: var(--sans); font-size: 13px;
-  padding: 5px 10px;
+  font-family: var(--sans); font-size: 12.5px;
+  padding: 6px 8px;
   outline: none;
 }
-.fleet-row-prompt:focus { border-color: var(--accent); }
-.fleet-row-x { flex: none; }
-.fleet-composer-foot { display: flex; align-items: center; gap: 8px; margin-top: 10px; }
-.fleet-note { color: var(--text-faint); font-size: 12px; margin-left: auto; text-align: right; }
-.fleet-tl-head { display: flex; align-items: center; gap: 14px; margin-bottom: 12px; }
-.fleet-tl-head h3 { margin: 0; }
-.fleet-legend { display: flex; gap: 12px; align-items: center; color: var(--text-dim); font-size: 12px; margin-left: auto; }
-.fleet-leg-item { display: inline-flex; align-items: center; gap: 5px; }
-.fleet-leg-swatch { width: 16px; height: 8px; border-radius: 2px; }
-/* Colour follows the agent (see the lane gutters); the legend explains the
-   treatments — solid = complete, red = failed, pulsing = in flight. */
-.fleet-leg-swatch.done { background: var(--text-dim); }
-.fleet-leg-swatch.failed { background: var(--red); }
-.fleet-leg-swatch.running {
-  background: var(--text-dim);
-  background-image: repeating-linear-gradient(45deg, transparent 0 3px, rgba(10, 13, 20, .45) 3px 6px);
-  animation: fleetPulse 1.6s ease-in-out infinite;
+.launcher-input::placeholder { color: var(--text-faint); }
+.launcher-input:focus { border-color: var(--accent); }
+.launcher-prompt { resize: vertical; min-height: 64px; max-height: 220px; line-height: 1.4; }
+.nav-launch-foot { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-top: 2px; }
+.nav-launch-hint { font-family: var(--mono); font-size: 10px; color: var(--text-faint); }
+
+
+/* ── Agent definition form (M21) ─────────────────────────────────── */
+.modal-wide { width: min(800px, 94vw); max-height: 90vh; }
+.modal-wide .modal-body { overflow-y: auto; }
+.form-section { margin-bottom: 18px; padding-bottom: 14px; border-bottom: 1px solid var(--border); }
+.form-section:last-child { border-bottom: none; margin-bottom: 0; }
+.form-section h4 {
+  margin: 0 0 8px;
+  font-family: var(--mono); font-size: 11px; font-weight: 600;
+  letter-spacing: 1.5px; text-transform: uppercase; color: var(--text-dim);
 }
-.fleet-empty { color: var(--text-faint); font-size: 13px; padding: 18px 0; }
-.fleet-tl { --fleet-gutter: 230px; }
-.fleet-axis-row { display: flex; }
-.fleet-gutter { width: var(--fleet-gutter); flex: none; min-width: 0; }
-.fleet-axis { flex: 1; position: relative; height: 20px; }
-.fleet-tick { position: absolute; top: 2px; transform: translateX(-50%); color: var(--text-faint); font-size: 11px; font-family: var(--mono); white-space: nowrap; }
-.fleet-lanes { position: relative; }
-.fleet-gridlines { position: absolute; top: 0; bottom: 0; left: var(--fleet-gutter); right: 0; pointer-events: none; }
-.fleet-gline { position: absolute; top: 0; bottom: 0; width: 1px; background: var(--border); }
-.fleet-lane { display: flex; align-items: center; }
-.fleet-lane + .fleet-lane { margin-top: 6px; }
-.fleet-lane-label { display: flex; align-items: center; gap: 8px; padding-right: 10px; overflow: hidden; }
-.fleet-swatch { width: 10px; height: 10px; border-radius: 3px; flex: none; }
-.fleet-swatch.running { animation: fleetPulse 1.6s ease-in-out infinite; }
-.fleet-lane-name { color: var(--text); font-weight: 500; font-size: 13px; text-decoration: none; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.fleet-lane-name:hover { color: var(--accent); }
-.fleet-lane-name.offline { color: var(--text-faint); }
-.fleet-lane-proj { color: var(--text-faint); font-size: 11px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; flex: 1; min-width: 0; }
-.fleet-lane-queue { color: var(--amber); font-size: 11px; flex: none; }
-.fleet-track { flex: 1; position: relative; height: 30px; }
-.fleet-track-empty { position: absolute; inset: 0 0 0 1px; display: flex; align-items: center; color: var(--text-faint); font-size: 11px; white-space: nowrap; }
-.fleet-bar { position: absolute; top: 8px; height: 14px; border: none; padding: 0; border-radius: 3px; min-width: 3px; box-shadow: 0 0 0 1.5px var(--panel); cursor: pointer; }
-.fleet-bar:hover { filter: brightness(1.25); }
-.fleet-bar.running { animation: fleetPulse 1.6s ease-in-out infinite; }
-/* In flight must also read statically (screenshots, print, a paused pulse):
-   hatched, the Gantt convention for work-in-progress, over the agent colour. */
-.fleet-bar.running::after {
-  content: '';
-  position: absolute;
-  inset: 0;
-  border-radius: inherit;
-  background: repeating-linear-gradient(45deg, transparent 0 3px, rgba(10, 13, 20, .45) 3px 6px);
+.form-section > .hint { margin-bottom: 10px; }
+.form-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 0 14px; }
+.form-grid .field { margin-bottom: 10px; }
+.accent-row { display: flex; align-items: center; gap: 8px; }
+.accent-in { width: 36px; height: 30px; padding: 2px; border: 1px solid var(--border-bright); border-radius: 8px; background: var(--panel-2); cursor: pointer; }
+.accent-swatches { display: flex; gap: 6px; }
+.accent-swatch {
+  width: 18px; height: 18px; border-radius: 50%; border: 1px solid var(--border-bright);
+  background: var(--agent-accent); cursor: pointer; padding: 0;
 }
-.fleet-bar.selected { box-shadow: 0 0 0 1.5px var(--panel), 0 0 0 2px var(--text-dim); }
-.fleet-detail { margin-top: 12px; border-top: 1px solid var(--border); padding-top: 10px; font-size: 12.5px; display: flex; flex-wrap: wrap; gap: 6px 16px; color: var(--text-dim); align-items: center; }
-.fleet-detail-prompt { flex-basis: 100%; color: var(--text); font-size: 13px; }
-@keyframes fleetPulse { 50% { opacity: .5; } }
-.fleet-tip { position: fixed; z-index: 60; display: none; background: var(--panel-2); border: 1px solid var(--border-bright); border-radius: 8px; padding: 9px 11px; font-size: 12px; max-width: 340px; pointer-events: none; box-shadow: 0 8px 28px rgba(0, 0, 0, .55); }
-.fleet-tip-head { display: flex; align-items: center; gap: 7px; margin-bottom: 5px; }
-.fleet-tip-head strong { color: var(--text); }
-.fleet-tip-state { color: var(--text-dim); margin-left: auto; padding-left: 10px; }
-.fleet-tip-state.failed { color: var(--red); }
-.fleet-tip-line { color: var(--text-dim); font-family: var(--mono); font-size: 11px; margin-bottom: 3px; }
-.fleet-tip-prompt { color: var(--text); margin-top: 5px; }
+.accent-swatch:hover { transform: scale(1.15); }
+.money-row { display: flex; gap: 6px; }
+.money-row input[type="number"] { flex: 1; min-width: 0; }
+.money-row .currency-in { flex: 0 0 64px; text-transform: uppercase; }
+.money-row select { flex: 0 0 110px; }
+.field .money-row input, .field .money-row select {
+  width: auto;
+  background: var(--panel-2); border: 1px solid var(--border-bright); border-radius: 8px;
+  color: var(--text); padding: 8px 10px; font-family: var(--sans); font-size: 13px; outline: none;
+}
+.row-list { display: flex; flex-direction: column; gap: 6px; }
+.row-list-head { display: flex; gap: 6px; margin-bottom: 4px; padding-right: 34px; font-size: 11px; color: var(--text-faint); }
+.row-list-head span { flex: 1; }
+.row-list-row { display: flex; gap: 6px; align-items: center; }
+.row-in {
+  flex: 1; min-width: 0;
+  background: var(--panel-2); border: 1px solid var(--border-bright); border-radius: 8px;
+  color: var(--text); padding: 6px 8px; font-family: var(--mono); font-size: 12px; outline: none;
+}
+.row-in:focus { border-color: var(--accent); }
+.row-in::placeholder { color: var(--text-faint); font-family: var(--sans); }
+.btn.ghost { background: transparent; border-color: transparent; color: var(--text-faint); }
+.btn.ghost:hover { color: var(--red); }
+.env-list { display: flex; flex-direction: column; gap: 3px; text-align: right; }
+.env-key { color: var(--text-dim); }
+.env-file { color: var(--accent); }
+.env-secret { color: var(--text-faint); letter-spacing: 1px; }
+.field .accent-in { width: 44px; }
+.kv { gap: 14px; }
+.kv .v { text-align: right; }
+.an-table a { color: var(--accent); text-decoration: none; }
+.an-table a:hover { text-decoration: underline; }

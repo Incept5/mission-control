@@ -264,7 +264,7 @@ mission control, and how its own work fits the whole.
 
 ## Milestones (in order)
 
-### M15 — Subscription billing on agent config
+### M15 — Subscription billing on agent config  ↦ folded into M21, shipped 2026-09-04
 - New fields on an agent's config: plan name, cost (amount + currency),
   billing period, and renewal date — entered by the user, one agent at a
   time (no shared/linked subscriptions across agents).
@@ -272,6 +272,9 @@ mission control, and how its own work fits the whole.
   existing actual/estimated API-cost figures, not just metadata on the card.
 - Reminder alert one day before the renewal date, through the existing
   notification channels (Telegram/email).
+
+Shipped as the Billing section of the M21 agent form — see M21's notes for
+the field shape, the Analytics line item and the reminder.
 
 ### M16 — Voice prompting  ✅ shipped 2026-09-04
 - Two transcription backends, picked per use: OpenAI Whisper API (needs a
@@ -310,7 +313,7 @@ several agents at once — e.g. one Claude Code agent in one workspace and
 another in a different workspace, concurrently — and to visualise them running
 together. Recorded as M17 to keep the milestone numbering continuous.
 
-### M17 — Fleet launch + run timeline  ✅ shipped 2026-09-04
+### M17 — Fleet launch + run timeline  ↦ retired 2026-09-04, replaced by M18
 - Launch N agent/prompt pairs in one action (project, agent type, prompt per
   row). Every row runs concurrently: busy agents are never stolen, so N rows
   always means N agents working at once (up to a 12-row cap).
@@ -350,4 +353,261 @@ assertions on validation, concurrency, all three claim modes, run pairing,
 windows, failure pairing, and broadcasts; plus a live 3-row launch on
 port 1970 against a stub `claude` exercising reused/repointed/spawned, with
 screenshots eyeballed mid-flight and at rest).
+
+---
+
+# Direct request — 2026-09-04 (later the same day)
+
+Not from a planning interview: after using M17 the user said they didn't like
+the Fleet page. What they actually wanted was simpler — start a new agent
+session from the Agents section of the sidebar, in an expanded menu item, and
+be taken straight to that agent's existing dashboard (chat prompt and all).
+M17's page, endpoints and timeline were removed rather than left as a second
+way in.
+
+### M18 — Sidebar agent launcher  ✅ shipped 2026-09-04
+- "+ New agent" at the bottom of the sidebar's Agents list expands in place
+  into a launcher: agent type, project (or own workspace), optional name,
+  optional first prompt.
+- Launch creates the agent, points it at the chosen project, sends the first
+  prompt, and routes to `#/agent/<id>` — the existing Control Room with the
+  chat composer, so the run is already streaming when the page lands.
+
+Shipped notes: no new server surface — the launcher composes the existing
+`POST /api/agents`, `POST /api/agents/:id/project` and `POST /api/agents/:id/chat`
+calls, so every existing guard (unknown type, unknown project, busy → queue)
+applies unchanged. Removed with M17: `POST /api/fleet/launch`,
+`GET /api/fleet/timeline`, `AgentManager.launchFleet/timeline`, the `#/fleet`
+route, the `fleet` origin kind and its ⁂ chip, and the timeline CSS. The
+launcher is one persistent DOM node re-appended by `renderSidebar` (never
+rebuilt), and its field values live in `state.agentLaunch`, so agent
+broadcasts re-rendering the sidebar don't eat what's being typed; type and
+project persist between launches, name and prompt reset. A blank name derives
+from the project ("<Project> agent") or the type ("<Type> agent"), numbered
+against the current agent list so repeated launches stay distinguishable. If
+the project pointer or the first prompt fails after the agent is created, the
+agent still exists and you still land on it — the prompt is kept as that
+agent's composer draft so nothing typed is lost. The Agents nav now scrolls
+(`#agent-nav` is the flex-1 region) so a long agent list plus the open form
+can't push the connection footer off-screen. ⌘/Ctrl+Enter in the prompt
+launches; Enter in the name field launches.
+
+---
+
+# Round 5 — planning interview 2026-09-04
+
+## Context from the interview
+
+- M18 exposed a modelling gap: the sidebar mixes two things that the code
+  never distinguished. Every launch called the same `POST /api/agents` the old
+  modal used, so each launch minted a permanent agent in `data/agents.json`
+  with its own workspace and history file, sitting next to the two built-ins
+  from `agents.config.js` with nothing but a `dynamic` flag to tell them
+  apart. "New agent" launched sessions; nothing in the UI could *register* an
+  agent at all (the endpoint only accepted a name and type).
+- The user's model, confirmed in the interview: a **registered agent** is a
+  definition — name, type, description, models, pricing, env — managed in the
+  dashboard. A **launched instance** is an ephemeral artefact: a live CLI
+  process of one registered agent working against one project. Any number of
+  instances may run per agent, concurrently, each on its own chosen project.
+- **History belongs to the project, not the agent.** An instance leaves
+  behind a conversation and its costs; those are the project's record of what
+  was done to it, not the agent's. The registered agent page carries
+  configuration, not chat.
+- Secrets stay out of the data dir: env values that are tokens keep the
+  `{ file: '~/path' }` form; the UI stores the path, never the token.
+- `agents.config.js` is kept as the seed for fresh installs; once seeded the
+  UI owns the registry, including the built-ins.
+- The two dynamic agents M18 left behind are deleted, not migrated.
+
+## Standing decisions (new)
+
+- **Registered agents are templates.** No chat runs against a registered
+  agent directly; the composer only exists on a launched instance. Sending a
+  message means launching (or being on) an instance.
+- **Instances are closed by hand, never auto-retired.** An idle instance stays
+  listed until its close button is used; close is refused while the instance
+  is working (409, like retire today). "Active" in the sidebar means "exists",
+  not "working" — the status dot carries working/idle.
+- **An instance always has a project.** Since history is project-owned, the
+  "Own workspace" option from M18 goes away; the launcher requires a project.
+  (Assumption from the history decision, not asked explicitly — the
+  workspace fallback can return as a pseudo-project if it's missed.)
+- **Instances are named "\<Project\> · \<Agent\>"**, with a counter only on
+  collision ("Fanfair · GLM 2").
+- **Token files, not token values.** Registering or editing env in the UI
+  accepts a plain value or a file path; anything that looks like a secret is
+  expected to be a path, and the config-file convention is documented on the
+  form.
+
+## Milestones (in order)
+
+### M19 — Registered agents vs instances + project-owned history  ✅ shipped 2026-09-04
+- Registry: `data/agents.json` becomes the list of *registered agents*,
+  seeded once from `agents.config.js` (id-matched so re-seeding never
+  duplicates); built-ins lose their special status after seeding. The M18
+  leftovers ("Claude Code agent", "Fanfair Platform agent") are dropped along
+  with their history files and workspaces.
+- Instances: `POST /api/agents/:id/instances { projectId, prompt? }` spawns a
+  live adapter for that registered agent (inheriting env/models/pricing),
+  pointed at the project, with the vault grant attributed to agent +
+  project + conversation. Instances have their own id, status, run record and
+  queue — everything an agent entry has today except config and history.
+  `DELETE /api/agents/:id/instances/:iid` closes an idle instance; 409 while
+  working. Instances are persisted (`data/instances.json`) so a server restart
+  brings them back idle with their conversation pointer intact.
+- History moves to the project: `data/history-<projectId>.json`, every event
+  stamped with `agentId` and `iid` as well as `cid`. The existing per-agent
+  history files and the `byProject` session pointers migrate once (the
+  `pid` stamp M13 added makes the split mechanical; events with no `pid` are
+  dropped with the workspace fallback). Project pages gain a "Conversations"
+  view listing every instance conversation that ran against the project
+  with agent, model, cost and duration; the Control Room's chat/timeline
+  reads from the project history filtered to the instance's conversation.
+- Analytics, catalog `lastActivity` and `agents` lists, task cards, and
+  notifications re-key from agent history to project history; per-agent
+  cost rollups become "per registered agent across projects".
+
+### M20 — Sidebar, launcher and home for the new model  ✅ shipped 2026-09-04 with M19
+- Sidebar Agents section lists registered agents; each row expands to show
+  its instances nested beneath (status dot, project, queue badge, close ✕
+  enabled only when idle). Clicking an instance opens the Control Room for
+  that instance; clicking the registered agent opens its config page (M21).
+- Launch lives per registered agent: a ▶ on each row expands the M18 form in
+  place with the type fixed — project (required), optional first prompt —
+  and routes to the new instance's Control Room with the run streaming.
+  The shared "+ New agent" at the bottom becomes "+ Register agent" (M21).
+- Home page shows both: one card per registered agent with its instances
+  grouped inside (status, project, cost); stat tiles count registered agents
+  and running instances separately.
+- Control Room header names the instance ("Fanfair · GLM"), its agent and its
+  project; the project dropdown goes (an instance's project is fixed at
+  launch), the model dropdown stays (per instance).
+
+Built notes (M19 + M20 together — M19 alone would have left the UI talking to
+endpoints that no longer exist, so the sidebar/home/Control Room moved in the
+same change). Server: `AgentManager` now holds `registry` (agents.json),
+`instances` (instances.json: id, agentId, projectId, name, cid, sessionId,
+skills, per-instance settings, queue) and `histories` (one array per project,
+`data/history-<pid>.json`, cap 2000, events stamped `agentId` + `iid` + `cid`
++ `pid`). One *probe* adapter per registered agent does the `--version`
+availability check and supplies the settings schema; its result is copied
+onto every idle instance, so N instances cost one probe every 20s, not N, and
+"CLI went offline" alerts fire once per agent. Instances close by hand only
+(`DELETE /api/instances/:iid`, 409 while working); everything that hung off
+`/api/agents/:id/…` (chat, stop, queue, skills, settings, files, git, attach,
+history, session/history clear) now hangs off `/api/instances/:iid/…`, and
+`POST /api/agents/:id/instances { projectId, prompt? }` launches. Registered
+agents gained `PUT /api/agents/:id` (name/description/accent/models/pricing/
+env, with pricing changes re-pricing stored results) and default settings at
+`/api/agents/:id/settings`; instance settings overlay those. Projects gained
+`GET /api/projects/:id/conversations` (per-cid rollup: agent, instance,
+prompts, runs, failures, cost, duration, models, ACTIVE flag) and
+`GET /api/projects/:id/history?cid=`. Board dispatch takes `instanceId` and
+refuses cross-project dispatch outright (an instance's project is fixed);
+tasks carry `instanceId` + `agentId`. WS: `hello` carries `instances`;
+`instances` / `instance_status` / `instance_event` / `instance_partial` /
+`history_cleared {iid, pid}` replace the agent-keyed messages. Deviations
+from the plan above: (1) `byProject` session pointers were *not* turned into
+idle instances — that would have booted with seven "ephemeral" instances
+nobody launched; their conversations are in the project histories, and a
+fresh launch starts a fresh CLI session. (2) Env/pricing edits reach existing
+instances on their *next run* (adapters hold a live reference to the registry
+entry), not only new launches — simpler, and the M21 page should say "next
+run". (3) The default workspace is gone: cards on the default-workspace board
+can't be dispatched (toast says why), and the analytics project list no
+longer has a "Default workspace" row. Migration runs once on boot when
+`state.json` lacks `_model: 2`: UI-created agents from the old model are
+deleted with their history files and `workspaces/<id>` dirs; built-in
+history is re-keyed into the project files by its `pid` stamp (pid-less
+events dropped), the old per-agent files renamed `*.json.v1`; per-agent
+keys leave state.json; `_seeded` records the config ids so a removed
+built-in never comes back. UI: sidebar rows are `nav-agent` (fold ▸/▾,
+accent swatch, name → `#/agent/<id>`, working/total badge, ▶ launch) with
+`nav-instance` rows beneath (dot, project, model-or-task, queue badge, ✕
+disabled while working); the launcher is one persistent node re-parented
+under whichever agent has it open; "+ Register agent" (name + type) sits at
+the bottom; a sidebar re-render is deferred while a sidebar field has focus
+so status broadcasts can't steal the caret. Home: agent cards with
+`instance-row`s inside, tiles for agents / instances / working / CLI tabs /
+instance spend. `#/instance/<iid>` is the Control Room (agent chip, project
+chip, per-instance model dropdown, "Close instance" replaces "Retire");
+`#/agent/<id>` is a read-only definition page with default settings and its
+instances (M21 adds editing); `#/project/<id>[/<cid>]` is the conversations
+browser (Mission Control conversations first, then the local Claude Code
+sessions from before). Feed rows and board 🗂 buttons open the instance
+when it's still open, else the conversation in the project. Verification:
+`node` could not be executed in the build session (harness permission
+denial for every invocation, including `node --check`), so this landed on
+static review only; the live pass (first boot on real data with the
+migration, a launch, a run, close, and the conversations page) was done on
+the user's own instance on 2026-09-04 and everything worked.
+
+### M21 — Agent config in the dashboard  ✅ shipped 2026-09-04 (with M15 folded in)
+- "+ Register agent" opens a form: name, type, description, accent, models
+  (value/label rows), pricing (plan/monthly and/or per-million rate card),
+  env (key + value-or-file-path rows). Saved to `data/agents.json`;
+  `POST /api/agents` accepts the full shape.
+- Registered agent page (reached from the sidebar) shows and edits the same
+  fields (`PUT /api/agents/:id`), lists its instances across projects with
+  costs, and offers Remove — refused (409) while any instance of it exists.
+  Built-ins are editable and removable like any other; a removed built-in is
+  not re-seeded (the seed records seeded ids in `data/state.json`).
+- Env edits apply to the next launch only; running instances keep the env
+  they were spawned with, and the page says so.
+- (M15, folded in) Billing gains the subscription fields: plan, amount +
+  currency, period, renewal date; Analytics lists subscriptions as a line
+  item; a reminder fires the day before renewal on Telegram/email.
+
+Shipped notes: one form for both jobs — `openAgentForm(null)` from
+"+ Register agent" (sidebar and the home add-card) and `openAgentForm(agent)`
+from ✎ Edit on the agent page — as a modal, so the sidebar's focus guard and
+the page's re-render on every broadcast never touch what's being typed. The
+page itself stays read-only: Definition (type, availability, models,
+billing, renewal, env as key = value / 📄 file path / •••••• masked), Default
+settings, a new "Spend across projects" block (runs, failures, spend and
+list-price estimate from `/api/analytics`, cached 10s because the page
+re-renders on every instance status), and the instances list. Sections:
+Identity (name, type — disabled while instances exist, the server 409s too —
+description, accent colour with the six preset swatches), Models (value /
+label rows), Billing (plan, amount, currency, per month/year, renews-on date;
+rate card rows model / input / output / cache read / cache write where a
+blank model is `default`, a single blank row stores the flat card), and
+Environment (variable, Value|File, value-or-path rows with the token-file
+convention on the form). Server: `normalizePricing` runs on registry load,
+seed, register and edit, so `monthly: 18` from older configs becomes
+`amount 18 / USD / month` and junk rates are dropped; `publicAgent` now
+exposes `env` for the form, sending `{ secret: true }` in place of any plain
+value under a token/key/password-looking name — the form shows a "stored,
+leave blank to keep" placeholder and posts the marker back, which
+`applyAgentPatch` resolves to the stored value. File-backed entries only ever
+hold the path. `agents.config.js` stays the seed and its comments still
+document the same shape. Deviation from the plan text: env (and models and
+pricing) edits reach running instances on their *next run*, not their next
+launch — adapters read the registry entry live — and the form says so.
+M15 in practice: `AgentManager.subscriptions()` (plan, amount, currency,
+period, renewsOn, daysToRenewal, monthlyEquivalent) rides on `/api/analytics`;
+the Analytics page gains a "Subscriptions / month" tile (summed per currency,
+yearly plans ÷ 12 — no FX conversion) and a Subscriptions table with the
+renewal countdown (amber ≤ 7 days, red overdue). `checkRenewals()` runs 2s
+after boot and every 5 minutes: a renewal ≤ 1 day away calls
+`notifier.renewalDue`, which sends once per agent per renewal date
+(`_state.renewalNotified`) on Telegram and, when email is enabled, as a
+mail; the `renewalReminder` event toggle sits on the Alerts page next to the
+others. A renewal date that has passed rolls forward one period (day clamped
+to the month's length, so the 31st stays month-end) and is saved, so the
+reminder recurs without re-entry — an assumption, not from the interview.
+Verified on a scratch copy of the data on port 1970: the API round trips
+(register with the full shape, edit keeping a masked secret, clearing
+pricing, amount without a plan name → "Subscription", remove), 19 scratch
+assertions on roll-forward / reminder / dedupe / channels, and a headless
+Chrome pass through the edit modal (prefilled rows, save, masked env
+placeholder, re-save keeps the secret), the register modal, Analytics and
+Alerts with no console errors. The user's own instance and data were not
+touched.
+
+Recommended order: M19 first — it is the data model the other two render,
+and doing the sidebar against the old model would be thrown away. M20 next so
+the change is usable; M21 last since the seed keeps registration working via
+the config file until then.
 
