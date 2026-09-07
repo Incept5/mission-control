@@ -61,6 +61,13 @@ app.get('/api/agents', wrap((req, res) => res.json(manager.listAgents())));
 
 app.get('/api/agent-types', wrap((req, res) => res.json(manager.agentTypes())));
 
+// Register-form helper: store a pasted API key in ~/.config/<dir>/token
+// (0700/0600, like the seeded GLM agent's ~/.config/zai/token) so the
+// registry only ever holds the path.
+app.post('/api/token-file', wrap((req, res) => {
+  res.json(manager.writeTokenFile(req.body || {}));
+}));
+
 app.post('/api/agents', wrap((req, res) => {
   res.json(manager.addAgent(req.body || {}));
 }));

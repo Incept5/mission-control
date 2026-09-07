@@ -1297,7 +1297,42 @@ a.hdr-chip:hover { color: var(--text); border-color: var(--accent); }
   background: var(--agent-accent); cursor: pointer; padding: 0;
 }
 .accent-swatch:hover { transform: scale(1.15); }
+/* Register wizard: harness/provider card picks and the step dots */
+.choice-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(180px, 1fr)); gap: 8px; }
+.choice-card {
+  text-align: left; padding: 10px 12px; border: 1px solid var(--border-bright); border-radius: 10px;
+  background: var(--panel-2); color: var(--text); cursor: pointer;
+  font-family: var(--sans); font-size: 13px;
+}
+.choice-card:hover { border-color: var(--text-dim); }
+.choice-card.active { border-color: var(--agent-accent, var(--accent)); box-shadow: 0 0 0 1px var(--agent-accent, var(--accent)) inset; }
+.choice-card-label { font-weight: 600; display: flex; align-items: center; gap: 8px; }
+.choice-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--agent-accent, var(--border-bright)); flex: 0 0 auto; }
+.choice-blurb { color: var(--text-dim); font-size: 12px; margin-top: 4px; }
+.wiz-dots { display: flex; gap: 6px; margin-bottom: 14px; }
+.wiz-dot {
+  width: 26px; height: 26px; border-radius: 50%; border: 1px solid var(--border-bright);
+  background: var(--panel-2); color: var(--text-dim); cursor: pointer; padding: 0;
+  font-family: var(--sans); font-size: 12px;
+}
+.wiz-dot.active { color: var(--text); border-color: var(--text-dim); }
+.wiz-dot.done { color: var(--green); border-color: var(--green); }
+/* Wizard Models step: preset models as tickable choices */
+.model-checks { display: flex; flex-direction: column; gap: 6px; margin-bottom: 10px; }
+.model-check {
+  display: flex; align-items: center; gap: 10px;
+  background: var(--panel-2); border: 1px solid var(--border-bright); border-radius: 8px;
+  padding: 7px 10px; cursor: pointer;
+}
+.model-check:hover { border-color: var(--text-dim); }
+.model-check input { accent-color: var(--accent); }
+.model-check span { font-weight: 500; }
+.model-check code {
+  margin-left: auto; color: var(--text-dim);
+  font-family: var(--mono); font-size: 11px;
+}
 .money-row { display: flex; gap: 6px; }
+.money-row > input { flex: 1; min-width: 0; }
 .money-row input[type="number"] { flex: 1; min-width: 0; }
 .money-row .currency-in { flex: 0 0 64px; text-transform: uppercase; }
 .money-row select { flex: 0 0 110px; }

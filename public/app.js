@@ -419,12 +419,13 @@ function agentLaunchState() {
 }
 
 let launcherNode = null;
+let launcherProjSel = null;
 
 function agentLauncher() {
   const f = agentLaunchState();
   if (launcherNode) { populateLauncherProjects(); return launcherNode; }
 
-  const projSel = el('select', { class: 'hdr-model', id: 'launcher-proj', title: 'Project this instance works in' });
+  launcherProjSel = el('select', { class: 'hdr-model', id: 'launcher-proj', title: 'Project this instance works in' });
   const promptIn = el('textarea', {
     class: 'launcher-input launcher-prompt', id: 'launcher-prompt',
     placeholder: 'First prompt (optional) — sent the moment the instance starts',
@@ -437,7 +438,7 @@ function agentLauncher() {
   });
 
   launcherNode = el('div', { class: 'nav-launch-form', id: 'nav-launch-form' },
-    projSel,
+    launcherProjSel,
     promptIn,
     el('div', { class: 'nav-launch-foot' },
       el('span', { class: 'nav-launch-hint' }, '⌘↵ to launch'),
@@ -450,7 +451,9 @@ function agentLauncher() {
 
 function populateLauncherProjects() {
   const f = agentLaunchState();
-  const sel = $('#launcher-proj');
+  // The form is built before renderSidebar attaches it to the document, so a
+  // document query can't see it yet — populate the cached node directly.
+  const sel = launcherProjSel;
   if (!sel) return;
   if (!state.projects.some((p) => p.id === f.projectId)) f.projectId = state.projects[0]?.id || '';
   sel.replaceChildren(
@@ -565,7 +568,10 @@ async function agentTypes() {
 // A list of identical rows (models, rate cards, env) with ✕ per row and an
 // add button. `columns` describe the inputs; `read()` returns one object per
 // row plus any `extra` the row was created with (used for masked secrets).
-function rowList({ columns, rows, addLabel, blank }) {
+// `decorate(row)` adds trailing controls before the ✕ (the env list uses it
+// for the token-file button); `reset(rows)` swaps the rows wholesale, which
+// is how applying a preset rebuilds a list.
+function rowList({ columns, rows, addLabel, blank, decorate }) {
   const list = el('div', { class: 'row-list' });
   const addRow = (values = {}, extra = {}) => {
     const row = el('div', { class: 'row-list-row' });
@@ -589,6 +595,7 @@ function rowList({ columns, rows, addLabel, blank }) {
       row._inputs[c.key] = input;
       row.append(input);
     }
+    if (decorate) decorate(row);
     row.append(el('button', { class: 'btn sm ghost', title: 'Remove', onclick: () => row.remove() }, '✕'));
     list.append(row);
     if (blank) blank(row);
@@ -605,7 +612,11 @@ function rowList({ columns, rows, addLabel, blank }) {
     for (const c of columns) out[c.key] = row._inputs[c.key].value.trim();
     return out;
   });
-  return { node, read };
+  const reset = (newRows = []) => {
+    [...list.children].forEach((row) => row.remove());
+    for (const r of newRows) addRow(r.values || r, r.extra || {});
+  };
+  return { node, read, reset };
 }
 
 // Register (agent = null) or edit (agent = registered agent). Everything the
@@ -633,6 +644,49 @@ async function openAgentForm(agent) {
       onclick: () => { accentIn.value = c; },
     })));
 
+  // Provider presets (registering only — editing keeps what's stored).
+  // Picking one fills the whole form for a known provider; the default
+  // "Other" pre-populates just the env var names to fill in by hand.
+  // lib/presets.js owns the data; /api/agent-types attaches it per type.
+  const presetsFor = (type) => (types.find((t) => t.type === type) || {}).presets || [];
+  let activeTokenDir = null;
+
+  // Harness + provider are card picks on the wizard's first step (the Type
+  // select stays the source of truth; edit mode renders it as before).
+  const choiceCard = (label, blurb, accent, active, onclick) => el('button', {
+    class: 'choice-card' + (active ? ' active' : ''),
+    type: 'button',
+    style: accent ? `--agent-accent:${accent}` : null,
+    onclick,
+  },
+    el('div', { class: 'choice-card-label' }, el('span', { class: 'choice-dot' }), label),
+    blurb ? el('div', { class: 'choice-blurb' }, blurb) : null,
+  );
+  const typeGrid = el('div', { class: 'choice-grid' });
+  const providerGrid = el('div', { class: 'choice-grid' });
+  function renderTypeCards() {
+    typeGrid.replaceChildren(...types.map((t) => choiceCard(
+      t.label, null, null, t.type === typeSel.value, () => selectType(t.type),
+    )));
+  }
+  function renderProviderCards(selectedId) {
+    const list = presetsFor(typeSel.value);
+    providerGrid.replaceChildren(...list.map((p) => choiceCard(
+      p.label, p.blurb, p.accent, p.id === selectedId,
+      () => { applyPreset(p); renderProviderCards(p.id); },
+    )));
+    if (!list.length) providerGrid.replaceChildren(
+      el('div', { class: 'hint' }, 'No presets for this harness — continue and set its environment on the next steps.'));
+  }
+  function selectType(type) {
+    typeSel.value = type;
+    const list = presetsFor(type);
+    if (list.length) applyPreset(list[0]);
+    else clearPresetFields();
+    renderTypeCards();
+    renderProviderCards(list.length ? list[0].id : null);
+  }
+
   // Models
   const models = rowList({
     columns: [
@@ -642,6 +696,31 @@ async function openAgentForm(agent) {
     rows: agent?.models || [],
     addLabel: 'Add model',
   });
+
+  // Preset models as tickable choices on the wizard's Models step — the
+  // provider's list, all on by default, plus the free-form rows for
+  // anything else. Editing loads stored models straight into the rows.
+  let modelCandidates = [];
+  const modelChecks = el('div', { class: 'model-checks' });
+  function renderModelChecks() {
+    modelChecks.replaceChildren(
+      el('div', { class: 'hint', style: 'margin-bottom:6px' }, 'From the provider — untick any you won\'t use'),
+      ...modelCandidates.map((m) => {
+        m.box = el('input', { type: 'checkbox', checked: '' });
+        return el('label', { class: 'model-check' }, m.box,
+          el('span', {}, m.label || m.value), el('code', {}, m.value));
+      }),
+    );
+    modelChecks.style.display = modelCandidates.length ? '' : 'none';
+  }
+  function readModels() {
+    const seen = new Set();
+    const out = [];
+    const add = (m) => { if (m.value && !seen.has(m.value)) { seen.add(m.value); out.push(m); } };
+    for (const c of modelCandidates) if (c.box?.checked) add({ value: c.value, label: c.label || c.value });
+    for (const m of models.read()) add({ value: m.value, label: m.label || m.value });
+    return out;
+  }
 
   // Billing — subscription
   const planIn = el('input', { placeholder: 'e.g. Max plan, GLM Coding Plan' });
@@ -673,6 +752,8 @@ async function openAgentForm(agent) {
     rows: cardRows,
     addLabel: 'Add rate card',
   });
+  // Presets stamp the source of their rates here so stale cards get checked.
+  const ratesNote = el('div', { class: 'hint', style: 'margin-top:6px' });
 
   // Env — value or file path per key; a masked secret keeps its stored value
   // unless something new is typed.
@@ -689,6 +770,19 @@ async function openAgentForm(agent) {
     ],
     rows: envRows,
     addLabel: 'Add variable',
+    // File rows get a button that stores a pasted key under ~/.config —
+    // the zai convention — and fills the path into the row.
+    decorate: (row) => {
+      const btn = el('button', {
+        class: 'btn sm ghost', type: 'button', style: 'display:none;flex:0 0 auto',
+        title: 'Create ~/.config/<dir>/token and store a pasted API key in it',
+      }, '🔑 Save key…');
+      const sync = () => { btn.style.display = row._inputs.mode.value === 'file' ? '' : 'none'; };
+      row._inputs.mode.addEventListener('change', sync);
+      sync();
+      btn.addEventListener('click', () => openTokenWriter(row));
+      row.append(btn);
+    },
     blank: (row) => {
       if (row._extra.secret) {
         row._inputs.value.placeholder = '•••••• stored — leave blank to keep';
@@ -696,6 +790,105 @@ async function openAgentForm(agent) {
       }
     },
   });
+
+  function applyPreset(p) {
+    if (!p) return;
+    activeTokenDir = p.tokenDir || null;
+    nameIn.value = p.name || '';
+    descIn.value = p.description || '';
+    if (p.accent) accentIn.value = p.accent;
+    modelCandidates = (p.models || []).map((m) => ({ ...m }));
+    renderModelChecks();
+    models.reset([]);
+    const pr = p.pricing || {};
+    planIn.value = pr.plan || '';
+    amountIn.value = typeof pr.amount === 'number' ? String(pr.amount) : '';
+    currencyIn.value = pr.currency || (typeof pr.amount === 'number' ? 'USD' : '');
+    periodSel.value = pr.period === 'year' ? 'year' : 'month';
+    renewsIn.value = pr.renewsOn || '';
+    const pm = pr.perMillion;
+    const cards = [];
+    if (isRateCard(pm)) cards.push({ model: '', ...pm });
+    else if (pm) for (const [m, c] of Object.entries(pm)) cards.push({ model: m === 'default' ? '' : m, ...c });
+    rates.reset(cards);
+    env.reset(Object.entries(p.env || {}).map(([key, v]) => (
+      v && typeof v === 'object' && 'file' in v
+        ? { values: { key, mode: 'file', value: String(v.file || '') } }
+        : { values: { key, mode: 'value', value: String(v ?? '') } }
+    )));
+    ratesNote.textContent = p.note || '';
+  }
+
+  function clearPresetFields() {
+    activeTokenDir = null;
+    modelCandidates = [];
+    renderModelChecks();
+    models.reset([]);
+    rates.reset([]);
+    env.reset([]);
+    planIn.value = '';
+    amountIn.value = '';
+    currencyIn.value = '';
+    renewsIn.value = '';
+    ratesNote.textContent = '';
+  }
+
+  // Modal on top of the form: writes the key to ~/.config/<dir>/token
+  // (0600, dir 0700) via the server, then points the env row at the path.
+  // The key never reaches the registry — only the file path is stored.
+  function openTokenWriter(row) {
+    const cur = row._inputs.value.value.trim();
+    const fromPath = (cur.match(/^~\/\.config\/([^/]+)\/token$/) || [])[1];
+    const dirIn = el('input', { placeholder: 'deepseek', value: fromPath || activeTokenDir || '' });
+    const keyIn = el('input', { type: 'password', autocomplete: 'off', placeholder: 'Paste the API key' });
+    const close = () => { overlay.remove(); document.removeEventListener('keydown', onKey); };
+    async function save(overwrite = false) {
+      const dir = dirIn.value.trim();
+      const value = keyIn.value.trim();
+      if (!dir || !value) { toast('Directory and key are both needed', true); return; }
+      try {
+        const out = await api('/api/token-file', { method: 'POST', body: { dir, value, overwrite } });
+        row._inputs.mode.value = 'file';
+        row._inputs.value.value = out.file;
+        toast(`${out.created ? 'Created' : 'Updated'} ${out.file}`);
+        close();
+      } catch (err) {
+        if (/already exists/.test(err.message) && confirm(`${err.message}\nOverwrite it?`)) return save(true);
+        toast(err.message, true);
+      }
+    }
+    function onKey(e) {
+      if (e.key === 'Escape') close();
+      else if (e.key === 'Enter') save();
+    }
+    const overlay = el('div', {
+      class: 'modal-overlay',
+      onclick: (e) => { if (e.target === overlay) close(); },
+    },
+      el('div', { class: 'modal modal-form' },
+        el('div', { class: 'modal-head' },
+          el('strong', {}, 'Store API key on disk'),
+          el('button', { class: 'btn sm modal-close', onclick: close }, '✕'),
+        ),
+        el('div', { class: 'modal-body' },
+          el('div', { class: 'field' },
+            el('label', {}, 'Provider directory'),
+            el('div', { class: 'money-row' }, el('span', { class: 'hint' }, '~/.config/'), dirIn, el('span', { class: 'hint' }, '/token')),
+            el('div', { class: 'hint' }, 'Written with 0700/0600 like ~/.config/zai/token — Mission Control stores only the path.'),
+          ),
+          el('div', { class: 'field' }, el('label', {}, 'API key'), keyIn),
+        ),
+        el('div', { class: 'modal-foot' },
+          el('span', { class: 'kb-spacer' }),
+          el('button', { class: 'btn', onclick: close }, 'Cancel'),
+          el('button', { class: 'btn primary', onclick: () => save() }, 'Save key'),
+        ),
+      ),
+    );
+    document.body.append(overlay);
+    document.addEventListener('keydown', onKey);
+    keyIn.focus();
+  }
 
   function readBody() {
     const perMillion = {};
@@ -716,7 +909,7 @@ async function openAgentForm(agent) {
       type: typeSel.value,
       description: descIn.value.trim(),
       accent: accentIn.value,
-      models: models.read().filter((m) => m.value),
+      models: readModels(),
       pricing: {
         plan: planIn.value.trim(),
         amount: amountIn.value === '' ? undefined : Number(amountIn.value),
@@ -733,7 +926,9 @@ async function openAgentForm(agent) {
     overlay.remove();
     document.removeEventListener('keydown', onKey);
   }
-  function onKey(e) { if (e.key === 'Escape') close(); }
+  // Escape closes only the top-most modal — the token writer nests on top
+  // of this form and has to go first.
+  function onKey(e) { if (e.key === 'Escape' && document.body.lastElementChild === overlay) close(); }
   async function save() {
     const body = readBody();
     if (!body.name) { toast('Give the agent a name', true); nameIn.focus(); return; }
@@ -758,6 +953,83 @@ async function openAgentForm(agent) {
     el('h4', {}, title), hint ? el('div', { class: 'hint' }, hint) : null, ...kids);
   const field = (label, input, extra) => el('div', { class: 'field' }, el('label', {}, label), input, extra || null);
 
+  // The five definition sections, built once and shared by both layouts —
+  // editing stacks them (everything visible at once for tweaking), while
+  // registering walks through them one step at a time.
+  const identityNode = section('Identity', null,
+    el('div', { class: 'form-grid' },
+      field('Name', nameIn),
+      editing ? field('Type', typeSel) : null,
+      field('Description', descIn),
+      field('Accent', el('div', { class: 'accent-row' }, accentIn, swatches)),
+    ),
+  );
+  const modelsNode = section('Models', 'Options for the instance model dropdown; values go to the CLI (claude --model). Leave empty for the adapter\'s defaults.',
+    modelChecks,
+    models.node);
+  const billingNode = section('Billing', 'A subscription means runs bill $0. A rate card (USD per million tokens) is what runs cost when there is no subscription; with one it only feeds the "≈$ list" estimate. Blank model = the default card.',
+    el('div', { class: 'form-grid' },
+      field('Plan', planIn),
+      field('Cost', el('div', { class: 'money-row' }, amountIn, currencyIn, currencyList, periodSel)),
+      field('Renews on', renewsIn, el('div', { class: 'hint' }, 'Reminder the day before via Telegram/email; rolls forward one period once it passes.')),
+    ),
+    el('div', { class: 'hint', style: 'margin:10px 0 6px' }, 'Rate card'),
+    rates.node,
+    ratesNote,
+  );
+  const envNode = section('Environment', 'Extra environment for the spawned CLI. Keep tokens out of Mission Control: put the secret in a file (e.g. ~/.config/zai/token) and choose File — the path is stored, never the token. Values under secret-looking keys are masked here.',
+    env.node);
+
+  // Wizard (registering): harness/provider → identity → connection →
+  // models → billing. Inputs live in every step regardless of which is
+  // showing, so save() reads the same body either way.
+  const steps = [
+    {
+      title: 'Harness & provider',
+      node: section('Harness & provider', 'Pick the CLI Mission Control spawns, then — for Claude Code — the provider behind it. Later steps pre-fill from this; the default "Other" leaves values blank.',
+        el('div', { class: 'hint', style: 'margin-bottom:6px' }, 'Harness'),
+        typeGrid,
+        el('div', { class: 'hint', style: 'margin:12px 0 6px' }, 'Provider'),
+        providerGrid),
+    },
+    { title: 'Identity', node: identityNode },
+    {
+      title: 'Connection',
+      node: section('Connection', 'The spawned CLI reads these. Presets fill everything but the token; "🔑 Save key…" stores a pasted key in ~/.config/<dir>/token so Mission Control only keeps the path.',
+        env.node),
+    },
+    { title: 'Models', node: modelsNode },
+    { title: 'Billing', node: billingNode },
+  ];
+  let stepIdx = 0;
+  const dots = el('div', { class: 'wiz-dots' });
+  const stepBody = el('div', {});
+  const backBtn = el('button', { class: 'btn', onclick: () => go(stepIdx - 1) }, '← Back');
+  const nextBtn = el('button', { class: 'btn primary', onclick: () => advance() }, 'Next');
+  function go(i) {
+    // Identity needs a name before the rest of the wizard makes sense.
+    if (stepIdx === 1 && i > stepIdx && !nameIn.value.trim()) {
+      toast('Give the agent a name first', true);
+      nameIn.focus();
+      return;
+    }
+    stepIdx = Math.max(0, Math.min(steps.length - 1, i));
+    renderStep();
+  }
+  function advance() {
+    if (editing || stepIdx === steps.length - 1) return save();
+    go(stepIdx + 1);
+  }
+  function renderStep() {
+    stepBody.replaceChildren(steps[stepIdx].node);
+    dots.replaceChildren(...steps.map((s, i) => el('button', {
+      class: 'wiz-dot' + (i === stepIdx ? ' active' : i < stepIdx ? ' done' : ''),
+      type: 'button', title: `${i + 1}. ${s.title}`, onclick: () => go(i),
+    }, i < stepIdx ? '✓' : String(i + 1))));
+    backBtn.style.visibility = stepIdx === 0 ? 'hidden' : '';
+    nextBtn.textContent = stepIdx === steps.length - 1 ? 'Register' : 'Next';
+  }
+
   const overlay = el('div', {
     class: 'modal-overlay',
     onclick: (e) => { if (e.target === overlay) close(); },
@@ -768,39 +1040,34 @@ async function openAgentForm(agent) {
         el('button', { class: 'btn sm modal-close', onclick: close }, '✕'),
       ),
       el('div', { class: 'modal-body' },
-        section('Identity', null,
-          el('div', { class: 'form-grid' },
-            field('Name', nameIn),
-            field('Type', typeSel),
-            field('Description', descIn),
-            field('Accent', el('div', { class: 'accent-row' }, accentIn, swatches)),
-          ),
-        ),
-        section('Models', 'Options for the instance model dropdown; values go to the CLI (claude --model). Leave empty for the adapter\'s defaults.',
-          models.node),
-        section('Billing', 'A subscription means runs bill $0. A rate card (USD per million tokens) is what runs cost when there is no subscription; with one it only feeds the "≈$ list" estimate. Blank model = the default card.',
-          el('div', { class: 'form-grid' },
-            field('Plan', planIn),
-            field('Cost', el('div', { class: 'money-row' }, amountIn, currencyIn, currencyList, periodSel)),
-            field('Renews on', renewsIn, el('div', { class: 'hint' }, 'Reminder the day before via Telegram/email; rolls forward one period once it passes.')),
-          ),
-          el('div', { class: 'hint', style: 'margin:10px 0 6px' }, 'Rate card'),
-          rates.node,
-        ),
-        section('Environment', 'Extra environment for the spawned CLI. Keep tokens out of Mission Control: put the secret in a file (e.g. ~/.config/zai/token) and choose File — the path is stored, never the token. Values under secret-looking keys are masked here.',
-          env.node),
-        editing ? el('div', { class: 'hint', style: 'margin-top:12px' },
-          'Changes reach existing instances on their next run; a pricing change re-prices stored results.') : null,
+        editing
+          ? [identityNode, modelsNode, billingNode, envNode,
+            el('div', { class: 'hint', style: 'margin-top:12px' },
+              'Changes reach existing instances on their next run; a pricing change re-prices stored results.')]
+          : el('div', {}, dots, stepBody),
       ),
       el('div', { class: 'modal-foot' },
         el('span', { class: 'kb-spacer' }),
         el('button', { class: 'btn', onclick: close }, 'Cancel'),
-        el('button', { class: 'btn primary', onclick: save }, editing ? 'Save' : 'Register'),
+        backBtn,
+        nextBtn,
       ),
     ),
   );
   document.body.append(overlay);
   document.addEventListener('keydown', onKey);
+  if (editing) {
+    backBtn.style.display = 'none';
+    nextBtn.textContent = 'Save';
+  } else {
+    // Fresh registration starts from the default preset, which for Claude
+    // Code is "Other": env var names ready, values blank.
+    renderTypeCards();
+    const list = presetsFor(typeSel.value);
+    if (list.length) applyPreset(list[0]);
+    renderProviderCards(list.length ? list[0].id : null);
+    renderStep();
+  }
   nameIn.focus();
 }
 

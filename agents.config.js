@@ -79,48 +79,10 @@ module.exports = {
       },
     },
 
-    // More providers that work the same way — copy, fill in, restart.
-    //
-    // Kimi (Moonshot):
-    // {
-    //   id: 'kimi', name: 'Kimi K2', type: 'claude-code', accent: '#34d399',
-    //   description: 'Claude Code harness on Moonshot Kimi',
-    //   env: {
-    //     ANTHROPIC_BASE_URL: 'https://api.moonshot.ai/anthropic',
-    //     ANTHROPIC_AUTH_TOKEN: { file: '~/.config/kimi/token' },
-    //     ANTHROPIC_DEFAULT_OPUS_MODEL: 'kimi-k2-thinking',
-    //     ANTHROPIC_DEFAULT_SONNET_MODEL: 'kimi-k2-thinking',
-    //     ANTHROPIC_DEFAULT_HAIKU_MODEL: 'kimi-k2-turbo-preview',
-    //   },
-    //   models: [{ value: 'kimi-k2-thinking', label: 'Kimi K2 Thinking' }],
-    // },
-    //
-    // DeepSeek:
-    // {
-    //   id: 'deepseek', name: 'DeepSeek', type: 'claude-code', accent: '#fbbf24',
-    //   description: 'Claude Code harness on DeepSeek',
-    //   env: {
-    //     ANTHROPIC_BASE_URL: 'https://api.deepseek.com/anthropic',
-    //     ANTHROPIC_AUTH_TOKEN: { file: '~/.config/deepseek/token' },
-    //     ANTHROPIC_DEFAULT_OPUS_MODEL: 'deepseek-chat',
-    //     ANTHROPIC_DEFAULT_SONNET_MODEL: 'deepseek-chat',
-    //     ANTHROPIC_DEFAULT_HAIKU_MODEL: 'deepseek-chat',
-    //   },
-    //   models: [{ value: 'deepseek-chat', label: 'DeepSeek V3' }],
-    // },
-    //
-    // Local model via Ollama (Ollama exposes an Anthropic-compatible endpoint):
-    // {
-    //   id: 'local', name: 'Local (Ollama)', type: 'claude-code', accent: '#c084fc',
-    //   description: 'Claude Code harness on a local Ollama model',
-    //   env: {
-    //     ANTHROPIC_BASE_URL: 'http://localhost:11434',
-    //     ANTHROPIC_AUTH_TOKEN: 'ollama',
-    //     ANTHROPIC_DEFAULT_OPUS_MODEL: 'qwen3-coder',
-    //     ANTHROPIC_DEFAULT_SONNET_MODEL: 'qwen3-coder',
-    //     ANTHROPIC_DEFAULT_HAIKU_MODEL: 'qwen3-coder',
-    //   },
-    //   models: [{ value: 'qwen3-coder', label: 'Qwen3 Coder' }],
-    // },
+    // More providers that work the same way — DeepSeek, Kimi (Moonshot),
+    // z.ai GLM, Ollama — have presets in lib/presets.js that the dashboard's
+    // "Register agent" dialog applies (and stores the API key under
+    // ~/.config/<dir>/token, the same convention as the glm entry above).
+    // Seeding entries here is only needed for CLI-only installs.
   ],
 };

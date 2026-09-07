@@ -81,12 +81,16 @@ Then open **http://localhost:1969** (Apollo 11 vintage — override with `PORT=x
 - **Registered agents** live in `data/agents.json`, seeded once from
   `agents.config.js` on first boot (the file is the seed for fresh installs;
   after that the dashboard owns the registry and a removed built-in stays
-  gone). "+ Register agent" at the bottom of the sidebar opens the definition
-  form: name, type, description, accent, models, billing (subscription and/or
-  rate card) and env. An agent's page (click its name) shows the same
-  definition with ✎ Edit, its default settings, spend across projects, running
-  instances, and Remove (refused while instances exist). Edits reach running
-  instances on their next run; a pricing change re-prices stored results.
+  gone). "+ Register agent" at the bottom of the sidebar opens a short
+  **wizard**: harness & provider (card picks — for Claude Code, provider
+  presets from `lib/presets.js`: DeepSeek, Kimi, z.ai GLM, Ollama, or
+  "Other" with the env var names pre-filled) → identity → connection (env,
+  with "🔑 Save key…" on file rows to write a pasted API key to
+  `~/.config/<dir>/token`, 0700/0600 — the registry only ever stores the
+  path) → models → billing (subscription and/or rate card). ✎ Edit on an
+  agent's page reopens the same definition as one flat form. Edits reach
+  running instances on their next run; a pricing change re-prices stored
+  results.
 - **Launch an instance** — ▶ on an agent's sidebar row (or its card / page)
   expands a launcher: pick the project it works in and an optional first
   prompt. Launching starts the instance, sends the prompt, and lands you on its
