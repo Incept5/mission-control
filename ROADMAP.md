@@ -106,7 +106,7 @@ Product decisions from the 2026-09-01 planning interview.
   list. Browse and edit in place (reuses the Workspace editor).
 - Project cards show a summary chip (e.g. "CLAUDE.md · 3 skills · 12 memories").
 
-### M10 — Two-way Telegram
+### M10 — Two-way Telegram  ✅ shipped 2026-09-08 (/commit deferred)
 - Inbound bot commands: `/status` (fleet), `/agents`, `/agent <id>` (current
   run, queue, last reply), `/send <id> <text>` (queue a prompt), `/stop <id>`,
   `/last <id>` (last assistant reply), `/diff <id>` (changed files summary).
@@ -116,6 +116,41 @@ Product decisions from the 2026-09-01 planning interview.
   `/commit <id> <msg>` command commits from the workspace.
 - Single allowed chat ID (already captured by "Detect"); everything else is
   ignored. Long-polling `getUpdates` from the server, no webhook/tunnel.
+
+Shipped notes: `lib/telegram-bot.js` owns a long-poll `getUpdates` loop
+(timeout 25s, offset-acked, 4s→60s backoff on errors incl. Telegram 409
+conflicts) and drives the manager through the same paths the instance API
+routes use — `sendChat` (origin kind `telegram`, so runs carry a ✈ chip
+everywhere M8 labels origins), `stop`, `listInstances`, `instanceHistory`,
+`git.status` on the project. Specs predate Round 5, so commands are
+*instance*-keyed: a ref is an exact id, a unique id prefix (3+ chars), or a
+unique case-insensitive name substring — `/send fanfair fix tests` works,
+ambiguous refs list their candidates. Reply routing: run-finished and
+run-error alerts record their `message_id` → instance in an in-memory map
+(capped 200) and carry a "Reply to route your next prompt" hint; a Telegram
+reply to one queues as that instance's next prompt and the confirmation is
+threaded under the reply. Alerts only — replies to old/other bot messages
+say so and suggest `/send`. Long replies split on line boundaries at 3800
+chars (hard-sliced if a single line exceeds it) and send in order. Detect
+reworked as decided: the poller is the *sole* `getUpdates` consumer, so the
+detect-chat endpoint now waits (60s) for the next live message — the Alerts
+button shows "Waiting for your message…" — and pairing persists + confirms
+with help text; `notifier.detectChatId` is gone. The poller runs whenever a
+bot token is configured (the alerts toggle gates outbound alerts only), so
+muting alerts never kills remote control — documented on the Alerts page.
+`TELEGRAM_API_BASE` (new, in `lib/telegram-api.js` shared by notifier and
+bot) redirects all Bot API traffic so verification runs against a stub.
+Fixes en route: the notifier's data dir ignored `MC_ROOT` (scratch
+instances shared the real `notifications.json` — and would have fought the
+real instance for Telegram updates); alerts and confirms now share one
+HTTP helper. Deferred: `/commit` answers "deferred" — read/dispatch/stop
+first, commit after use. Verified on a scratch MC_ROOT on port 1970 with a
+stub Bot API and stub `claude` (24 assertions: Detect-pairs-via-poller,
+allowlist ignore, every command incl. ambiguity/unknown refs, telegram
+origin in history, reply-to-alert routing threaded, /stop mid-run and on
+idle, chunking a 9000-char reply into 3 messages, 409 backoff recovery,
+chatId persisted under MC_ROOT, real repo data untouched, clean SIGINT).
+The user's 1969 instance and real Telegram were never contacted.
 
 ### M11 — Mission control memory  ↦ superseded by Round 3 (M12–M14)
 - Designed as a deliberate placeholder for the fleet vault ("plain Markdown so

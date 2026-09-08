@@ -8,6 +8,7 @@ const AgentManager = require('./lib/agent-manager');
 const files = require('./lib/files');
 const git = require('./lib/git');
 const Notifier = require('./lib/notify');
+const TelegramBot = require('./lib/telegram-bot');
 const claudeStore = require('./lib/claude-store');
 const cliSessions = require('./lib/cli-sessions');
 const voice = require('./lib/voice');
@@ -30,9 +31,15 @@ function broadcast(msg) {
 }
 
 const manager = new AgentManager(agentsConfig, broadcast, process.env.MC_ROOT || __dirname);
-const notifier = new Notifier(path.join(__dirname, 'data'));
+const notifier = new Notifier(path.join(process.env.MC_ROOT || __dirname, 'data'));
 manager.notifier = notifier;
 manager.init();
+
+// M10 — two-way Telegram. The bot owns the update stream whenever a bot
+// token is configured; the alerts toggle gates outbound alerts only, so
+// muting alerts never kills remote control.
+const telegramBot = new TelegramBot(notifier, manager);
+telegramBot.start();
 
 // Daily email digest: checked every 5 minutes, sent once per day after the
 // configured hour.
@@ -285,7 +292,9 @@ app.get('/api/feed', wrap((req, res) => {
 app.get('/api/notifications', wrap((req, res) => res.json(notifier.getConfig())));
 
 app.put('/api/notifications', wrap((req, res) => {
-  res.json(notifier.update(req.body || {}));
+  const config = notifier.update(req.body || {});
+  telegramBot.sync();   // token set/cleared → poller follows
+  res.json(config);
 }));
 
 app.post('/api/notifications/test', wrap(async (req, res) => {
@@ -305,7 +314,9 @@ app.post('/api/notifications/test', wrap(async (req, res) => {
 }));
 
 app.post('/api/notifications/telegram/detect-chat', wrap(async (req, res) => {
-  res.json(await notifier.detectChatId());
+  // M10: the poller owns getUpdates, so pairing waits for the next live
+  // message from the phone (up to 60s) instead of reading the backlog.
+  res.json(await telegramBot.waitPairing(60000));
 }));
 
 app.post('/api/notifications/digest/send', wrap(async (req, res) => {
@@ -468,10 +479,12 @@ server.listen(PORT, () => {
 });
 
 process.on('SIGINT', () => {
+  telegramBot.stop();
   manager.shutdown();
   process.exit(0);
 });
 process.on('SIGTERM', () => {
+  telegramBot.stop();
   manager.shutdown();
   process.exit(0);
 });

@@ -1224,15 +1224,18 @@ async function refreshCliSessions() {
 
 /* ── Run origin + duration estimate ──────────────────────────────── */
 
-// Human label for where a run came from: chat, a board card, or the queue
-// (which remembers what fed it).
+// Human label for where a run came from: chat, a board card, Telegram, or
+// the queue (which remembers what fed it).
 function originLabel(origin) {
   if (!origin || !origin.kind) return null;
   const card = origin.taskTitle ? ' · ' + origin.taskTitle : '';
   if (origin.kind === 'chat') return '💬 chat';
   if (origin.kind === 'board') return '⌗ board' + card;
+  if (origin.kind === 'telegram') return '✈ telegram';
   if (origin.kind === 'queue') {
-    const via = origin.via === 'board' ? '⌗ board' + card : '💬 chat';
+    const via = origin.via === 'board' ? '⌗ board' + card
+      : origin.via === 'telegram' ? '✈ telegram'
+      : '💬 chat';
     return '⧗ queue ← ' + via;
   }
   return origin.kind;
@@ -1769,18 +1772,23 @@ async function renderAlerts() {
               tgChat,
               el('button', {
                 class: 'btn',
-                onclick: async () => {
+                onclick: async (e) => {
+                  const btn = e.currentTarget;
                   try {
                     await trySave(true);
+                    btn.disabled = true;
+                    btn.textContent = 'Waiting for your message…';
                     const r = await api('/api/notifications/telegram/detect-chat', { method: 'POST', body: {} });
                     tgChat.value = r.chatId;
                     toast(`Chat detected${r.name ? ': ' + r.name : ''}`);
                   } catch (err) { if (err?.message) toast(err.message, true); }
+                  finally { btn.disabled = false; btn.textContent = 'Detect'; }
                 },
               }, 'Detect'),
             ),
           ),
-          el('p', { class: 'hint' }, '1. Create a bot with @BotFather and paste its token. 2. Send your bot any message. 3. Click Detect.'),
+          el('p', { class: 'hint' }, '1. Create a bot with @BotFather and paste its token. 2. Click Detect, then send your bot any message — the chat pairs when it arrives.'),
+          el('p', { class: 'hint' }, 'The paired chat also controls the fleet: /status, /agents, /agent, /send, /stop, /last, /diff — or reply to a run alert to queue its next prompt. Commands work whenever a bot token is set; the toggle above only gates alerts.'),
           testBtn('Send test message', async () => {
             await api('/api/notifications/test', { method: 'POST', body: { channel: 'telegram' } });
             toast('Test message sent ✓');
