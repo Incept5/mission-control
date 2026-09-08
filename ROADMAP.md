@@ -654,3 +654,56 @@ send."
   port 1970 (the user's 1969 instance untouched): extraction unit checks,
   scripted result events through a stub CLI, and a headless Chrome pass of
   ghost → Tab → send; details in the session log.
+
+---
+
+# Round 7 — direct request 2026-09-08
+
+Not an interview: the user reported that the M22 suggestion "always
+defaults a statement that does not match the context of the previous run" —
+always the git-aware fallback line.
+
+Diagnosis against the real histories (21 finished runs): agents close with
+contextual prose — "Nothing is committed. Review the diff and commit when
+you're happy with it", "Story breakdown remains the next step when you want
+it" — but only once in 21 under a "Next steps" heading the extractor can
+find. The M22 assumption that volunteered lists would carry the feature was
+wrong.
+
+## Standing decisions (new)
+
+- **M22's "no extra model call" is reversed.** The one-shot ask is the
+  contextual path; the cost is one small headless call per finished run on
+  the agent's own plan/meter, accepted knowingly. It is deliberately
+  invisible to history and the cost dashboards (a side-channel spawn, not a
+  run) — if that ever needs revisiting, synthesize a synthetic result event
+  rather than polluting the conversation.
+- **The model's NONE verdict is final.** When the one-shot says nothing
+  sensible remains, no ghost at all — a canned prompt would contradict the
+  model's judgment. Deterministic fallbacks only run when the one-shot
+  *failed* (offline CLI, timeout, non-zero exit), not when it answered.
+
+### M23 — Contextual suggestions via one-shot model call  ✅ shipped 2026-09-08
+- `oneShot(prompt)` on every adapter: one fresh-context headless call that
+  never resumes the session, never emits events, never flips state — the
+  conversation history is untouched (verified: exactly the run's own 5
+  events, zero from the side-channel). claude-code: `claude -p --output-
+  format json --permission-mode default` (tools auto-denied headless);
+  codex `exec --sandbox read-only`; gemini `-p --output-format json`;
+  opencode `run`. Shared `quietSpawn` in the base adapter (SIGKILL at
+  timeout, null on any failure). Base default null → adapters without a
+  cheap one-shot mode fall straight through to the deterministic path.
+- Chain: extracted list → failure diagnostic → one-shot ask → git-aware
+  fallback only on one-shot failure. The ask carries the operator's last
+  prompt (≤400 chars) + the closing text (≤2500), demands ONE imperative
+  ≤25-word prompt or exactly `NONE`; `normalizeSuggestion` strips
+  fences/quotes/newlines, caps 240.
+- Shipped notes: claude-code adapter's env building factored into
+  `claudeEnv(config)` shared by `send` and `oneShot`. Verified on the port
+  1970 scratch instance (stub CLI distinguishing run vs one-shot by
+  `--output-format`): contextual path, NONE → no ghost, quoted reply
+  stripped, explicit list still wins with no model call, failure still
+  diagnostic, one-shot failure → git fallback, no history pollution, and a
+  headless-Chrome pass (contextual ghost renders, no cycling hint for a
+  single item, Tab fills). codex/gemini/opencode oneShots mirror their
+  `send` invocations but were stub-verified only, like M7.
