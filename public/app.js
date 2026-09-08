@@ -617,7 +617,8 @@ function rowList({ columns, rows, addLabel, blank, decorate }) {
     [...list.children].forEach((row) => row.remove());
     for (const r of newRows) addRow(r.values || r, r.extra || {});
   };
-  return { node, read, reset };
+  const rowEls = () => [...list.children];
+  return { node, read, reset, rows: rowEls };
 }
 
 // Register (agent = null) or edit (agent = registered agent). Everything the
@@ -702,17 +703,70 @@ async function openAgentForm(agent) {
   // provider's list, all on by default, plus the free-form rows for
   // anything else. Editing loads stored models straight into the rows.
   let modelCandidates = [];
+  let activePreset = null;
   const modelChecks = el('div', { class: 'model-checks' });
+  const modelsNote = el('div', { class: 'hint', style: 'display:none' });
+  function setModelsNote(text) {
+    modelsNote.textContent = text || '';
+    modelsNote.style.display = text ? '' : 'none';
+  }
   function renderModelChecks() {
     modelChecks.replaceChildren(
       el('div', { class: 'hint', style: 'margin-bottom:6px' }, 'From the provider — untick any you won\'t use'),
       ...modelCandidates.map((m) => {
         m.box = el('input', { type: 'checkbox', checked: '' });
+        m.box.addEventListener('change', syncDiscoveredDefaults);
         return el('label', { class: 'model-check' }, m.box,
           el('span', {}, m.label || m.value), el('code', {}, m.value));
       }),
     );
     modelChecks.style.display = modelCandidates.length ? '' : 'none';
+  }
+
+  // Set an env row's value by variable name (mode forced back to Value —
+  // the model rows are never file-backed). Returns false if no such row.
+  function setEnvValue(key, value) {
+    for (const row of env.rows()) {
+      if (row._inputs.key.value.trim() === key) {
+        row._inputs.mode.value = 'value';
+        row._inputs.value.value = value;
+        return true;
+      }
+    }
+    return false;
+  }
+
+  // Presets flagged `discover` (Ollama) read their model list from the
+  // provider itself: Ollama's API only takes full name:tag values, so a
+  // hardcoded guess 404s at run time even though the model is pulled. The
+  // first ticked model also fills the ANTHROPIC_DEFAULT_*_MODEL rows — the
+  // aliases Claude Code resolves for sub-agents and background calls.
+  async function discoverModels(preset) {
+    let base = '';
+    for (const row of env.rows()) {
+      if (row._inputs.key.value.trim() === 'ANTHROPIC_BASE_URL') base = row._inputs.value.value.trim();
+    }
+    if (!base) base = 'http://localhost:11434';
+    setModelsNote(`Reading installed models from ${base}…`);
+    try {
+      const out = await api('/api/ollama-models?base=' + encodeURIComponent(base));
+      modelCandidates = out.models;
+      renderModelChecks();
+      syncDiscoveredDefaults();
+      setModelsNote(out.models.length
+        ? `${out.models.length} models found at ${out.base} — full name:tag values, exactly what the API accepts`
+        : `No chat models installed at ${out.base} — pull one (\`ollama pull …\`), reopen this dialog and pick the preset again`);
+    } catch (err) {
+      setModelsNote(`${err.message} — add the models below by hand as full name:tag values (\`ollama list\` shows them).`);
+    }
+  }
+  function syncDiscoveredDefaults() {
+    if (!activePreset?.discover) return;
+    const first = modelCandidates.find((m) => m.box?.checked) || modelCandidates[0];
+    if (!first) return;
+    for (const key of ['ANTHROPIC_DEFAULT_OPUS_MODEL', 'ANTHROPIC_DEFAULT_SONNET_MODEL', 'ANTHROPIC_DEFAULT_HAIKU_MODEL']) {
+      setEnvValue(key, first.value);
+    }
   }
   function readModels() {
     const seen = new Set();
@@ -795,6 +849,7 @@ async function openAgentForm(agent) {
   function applyPreset(p) {
     if (!p) return;
     activeTokenDir = p.tokenDir || null;
+    activePreset = p;
     nameIn.value = p.name || '';
     descIn.value = p.description || '';
     if (p.accent) accentIn.value = p.accent;
@@ -818,10 +873,16 @@ async function openAgentForm(agent) {
         : { values: { key, mode: 'value', value: String(v ?? '') } }
     )));
     ratesNote.textContent = p.note || '';
+    // Discovery fires after the env rows are reset so it can read (and fill)
+    // them; async, so a slow provider never blocks the form.
+    if (p.discover) discoverModels(p);
+    else setModelsNote('');
   }
 
   function clearPresetFields() {
     activeTokenDir = null;
+    activePreset = null;
+    setModelsNote('');
     modelCandidates = [];
     renderModelChecks();
     models.reset([]);
@@ -967,6 +1028,7 @@ async function openAgentForm(agent) {
   );
   const modelsNode = section('Models', 'Options for the instance model dropdown; values go to the CLI (claude --model). Leave empty for the adapter\'s defaults.',
     modelChecks,
+    modelsNote,
     models.node);
   const billingNode = section('Billing', 'A subscription means runs bill $0. A rate card (USD per million tokens) is what runs cost when there is no subscription; with one it only feeds the "≈$ list" estimate. Blank model = the default card.',
     el('div', { class: 'form-grid' },

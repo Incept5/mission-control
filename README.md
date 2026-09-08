@@ -84,7 +84,11 @@ Then open **http://localhost:1969** (Apollo 11 vintage — override with `PORT=x
   gone). "+ Register agent" at the bottom of the sidebar opens a short
   **wizard**: harness & provider (card picks — for Claude Code, provider
   presets from `lib/presets.js`: DeepSeek, Kimi, z.ai GLM, Ollama, or
-  "Other" with the env var names pre-filled) → identity → connection (env,
+  "Other" with the env var names pre-filled. The Ollama preset is
+  `discover`-flagged: the wizard reads the models actually installed on the
+  local server (`GET /api/ollama-models`) — Ollama's API only accepts full
+  `name:tag` values, so a guessed name 404s at run time) → identity →
+  connection (env,
   with "🔑 Save key…" on file rows to write a pasted API key to
   `~/.config/<dir>/token`, 0700/0600 — the registry only ever stores the
   path) → models → billing (subscription and/or rate card). ✎ Edit on an

@@ -68,6 +68,37 @@ app.post('/api/token-file', wrap((req, res) => {
   res.json(manager.writeTokenFile(req.body || {}));
 }));
 
+// Register-form helper: the chat models actually installed on an Ollama
+// server (GET <base>/api/tags). Ollama's API only accepts full name:tag
+// values — `qwen3-coder` is a 404 even with qwen3-coder:30b pulled — so the
+// Ollama preset offers what the server really has instead of a hardcoded
+// guess. Embedding-only models are dropped; they can't answer a chat.
+app.get('/api/ollama-models', wrap(async (req, res) => {
+  const base = String(req.query.base || '').trim() || 'http://localhost:11434';
+  let url;
+  try {
+    url = new URL(base);
+  } catch {
+    throw Object.assign(new Error(`"${base}" is not a URL`), { status: 400 });
+  }
+  if (url.protocol !== 'http:' && url.protocol !== 'https:') {
+    throw Object.assign(new Error('base must be an http(s) URL'), { status: 400 });
+  }
+  url.pathname = url.pathname.replace(/\/+$/, '') + '/api/tags';
+  let response;
+  try {
+    response = await fetch(url, { signal: AbortSignal.timeout(4000) });
+  } catch (err) {
+    throw Object.assign(new Error(`Could not reach ${base} — is Ollama running? (${err.message})`), { status: 502 });
+  }
+  if (!response.ok) throw Object.assign(new Error(`Ollama at ${base} answered ${response.status}`), { status: 502 });
+  const data = await response.json();
+  const models = (data.models || [])
+    .filter((m) => (m.capabilities || []).includes('completion'))
+    .map((m) => ({ value: String(m.name), label: String(m.name) }));
+  res.json({ base, models });
+}));
+
 app.post('/api/agents', wrap((req, res) => {
   res.json(manager.addAgent(req.body || {}));
 }));
