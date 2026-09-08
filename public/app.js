@@ -16,6 +16,7 @@ const state = {
   fileTree: {},          // iid -> { expanded:Set, root, selected } (file trees)
   attach: {},            // iid -> staged uploads / file references for the next message
   drafts: {},            // iid -> unsent composer text, survives instance switches
+  suggest: {},           // iid -> composer ghost suggestion { at, cid, items, idx, dismissed }
   skillsCache: {},       // iid -> { at, items } for the composer's `/` picker
   sessionSel: {},        // iid -> selected session cid
   agentCid: {},          // iid -> last seen conversation id (change detection)
@@ -3029,6 +3030,7 @@ function onStatusChanged(agentId) {
   const st = agent.status || {};
   const cidChanged = (st.cid || null) !== (state.agentCid[agentId] ?? (st.cid || null));
   state.agentCid[agentId] = st.cid || null;
+  syncSuggest(agentId);
 
   if (currentInstanceId() === agentId) {
     const dot = $('#hdr-dot');
@@ -3041,6 +3043,7 @@ function onStatusChanged(agentId) {
       else {
         updateWorkingBar(agent);
         updateQueueBar(agent);
+        updateSuggestGhost(agentId);
       }
     }
     if (state.tab === 'control') refreshControlInfo(agent);
@@ -3056,6 +3059,49 @@ function onStatusChanged(agentId) {
 }
 
 /* ── Chat tab ────────────────────────────────────────────────────── */
+
+// Ghost suggestion (M22): when a run finishes, the server attaches
+// `status.suggest` — follow-up prompts derived from the run. The composer
+// shows the current one greyed-out behind an empty box; Tab fills it in as
+// real text (Enter sends it like any typed message), ↑/↓ step through the
+// alternatives, Esc dismisses. Nothing is ever auto-sent.
+function syncSuggest(iid) {
+  const st = getInstance(iid)?.status || {};
+  const cur = state.suggest[iid];
+  if (st.suggest) {
+    if (!cur || cur.at !== st.suggest.at) {
+      state.suggest[iid] = { ...st.suggest, idx: 0, dismissed: false };
+    }
+  } else if (cur) delete state.suggest[iid];
+}
+
+function updateSuggestGhost(iid) {
+  const input = $('#composer-input');
+  const ghost = $('#ghost-text');
+  if (!input || !ghost || currentInstanceId() !== iid) return;
+  const st = getInstance(iid)?.status || {};
+  const s = state.suggest[iid];
+  if (!s || s.dismissed || s.cid !== (st.cid || null) ||
+      st.state === 'working' || (st.queue || []).length || input.value) {
+    ghost.classList.add('hidden');
+    input.classList.remove('ghosted');
+    return;
+  }
+  if (!s.items.length) {
+    ghost.classList.add('hidden');
+    input.classList.remove('ghosted');
+    return;
+  }
+  s.idx = Math.min(s.idx || 0, s.items.length - 1);
+  ghost.replaceChildren(
+    el('span', { class: 'ghost-body' }, s.items[s.idx]),
+    el('span', { class: 'ghost-hint' }, s.items.length > 1
+      ? `  ⇥ fill · ↑↓ ${s.idx + 1}/${s.items.length} · esc`
+      : '  ⇥ fill · esc'),
+  );
+  ghost.classList.remove('hidden');
+  input.classList.add('ghosted');
+}
 
 function updatePartialBubble(text) {
   const log = $('#chat-log');
@@ -3415,6 +3461,9 @@ function renderChat(agent, body) {
     placeholder: `Message ${agent.name}…  (Enter to send, Shift+Enter for newline, paste/drop files to attach)`,
     rows: '1',
   });
+  // Ghost suggestion overlay (M22): the suggested next step, greyed out over
+  // an empty box. Tab renders it as real text; see updateSuggestGhost.
+  const ghost = el('div', { class: 'ghost-text hidden', id: 'ghost-text' });
   // Restore the unsent draft, like staged attachments above.
   input.value = state.drafts[agent.id] || '';
   // Slash-command picker: typing `/` at the start of the message lists the
@@ -3519,6 +3568,34 @@ function renderChat(agent, body) {
 
   input.addEventListener('keydown', (e) => {
     if (slashKey(e)) return;
+    // Ghost suggestion: Tab renders it as real text (Enter then sends it),
+    // arrows cycle alternatives, Esc dismisses. Only offered over an empty
+    // box, so it never fights real typing or the `/` picker.
+    const s = state.suggest[agent.id];
+    if (s && !s.dismissed && !input.value && s.items.length) {
+      if (e.key === 'Tab') {
+        e.preventDefault();
+        s.idx = Math.min(s.idx || 0, s.items.length - 1);
+        input.value = s.items[s.idx];
+        input.setSelectionRange(input.value.length, input.value.length);
+        input.dispatchEvent(new Event('input'));   // grow, save draft, hide ghost
+        input.focus();
+        return;
+      }
+      if (e.key === 'Escape') {
+        e.preventDefault();
+        s.dismissed = true;
+        updateSuggestGhost(agent.id);
+        return;
+      }
+      if ((e.key === 'ArrowDown' || e.key === 'ArrowUp') && s.items.length > 1) {
+        e.preventDefault();
+        const n = s.items.length;
+        s.idx = ((s.idx || 0) + (e.key === 'ArrowDown' ? 1 : n - 1)) % n;
+        updateSuggestGhost(agent.id);
+        return;
+      }
+    }
     if (e.key === 'Enter' && !e.shiftKey) {
       e.preventDefault();
       submit();
@@ -3528,6 +3605,7 @@ function renderChat(agent, body) {
     input.style.height = 'auto';
     input.style.height = Math.min(input.scrollHeight, 160) + 'px';
     state.drafts[agent.id] = input.value;
+    updateSuggestGhost(agent.id);
     updateSlash();
   });
   input.addEventListener('click', updateSlash);
@@ -3635,6 +3713,7 @@ function renderChat(agent, body) {
     input.value = '';
     input.style.height = 'auto';
     state.drafts[agent.id] = '';
+    updateSuggestGhost(agent.id);   // a sent message retires the ghost now, not on the next status broadcast
     try {
       const result = await api(`/api/instances/${agent.id}/chat`, { method: 'POST', body: { message: text } });
       if (result.queued) toast(`Queued — position ${result.position}`);
@@ -3657,7 +3736,8 @@ function renderChat(agent, body) {
     workingSlot,
     el('div', { id: 'queue-slot' }),
     attachRow,
-    el('div', { class: 'composer' }, slashMenu, newSessionBtn, attachBtn, filesBtn, promptsBtn, micButton(agent), input, sendBtn),
+    el('div', { class: 'composer' }, slashMenu, newSessionBtn, attachBtn, filesBtn, promptsBtn, micButton(agent),
+      el('div', { class: 'composer-input' }, ghost, input), sendBtn),
   );
   // Drop targets: a row dragged from a file tree becomes a reference chip;
   // anything else (files from the OS) is uploaded as an attachment.
@@ -3700,6 +3780,8 @@ function renderChat(agent, body) {
   }
   updateWorkingBar(agent);
   updateQueueBar(agent);
+  syncSuggest(agent.id);
+  updateSuggestGhost(agent.id);
   log.scrollTop = log.scrollHeight;
   input.focus();
 }

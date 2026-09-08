@@ -611,3 +611,46 @@ and doing the sidebar against the old model would be thrown away. M20 next so
 the change is usable; M21 last since the seed keeps registration working via
 the config file until then.
 
+
+---
+
+# Round 6 — direct request 2026-09-07
+
+Not a planning interview: the user asked that "when the response from the
+prompt has finished, any suggested next steps should be greyed out in the
+prompt text box, and tabbing would render the text so the user can hit
+send."
+
+## Standing decisions (new)
+
+- **Suggestions come from the run itself — no extra model call.** A
+  per-finish LLM round-trip would spend tokens invisibly (untracked by the
+  cost dashboards) and arrive seconds late. The model's own closing "next
+  steps" list is extracted; failing that, a diagnostic prompt for a failed
+  run, then a git-aware generic follow-up.
+- **Ghost text, never auto-sent.** Same rule as M6/M16: the composer only
+  ever holds editable text the operator chose. Tab renders the suggestion;
+  Enter is still the only thing that sends.
+
+### M22 — Suggested next steps as composer ghost text  ✅ shipped 2026-09-07
+- When a run finishes, `status.suggest` appears on the instance broadcast:
+  `{ items: [≤3 prompts], at, cid }`. The composer shows the current item
+  greyed-out behind an empty box; Tab fills it in as real text (send with
+  Enter), ↑/↓ cycle alternatives, Esc dismisses.
+- Never offered while working or queued (the queue already holds the
+  operator's actual next step), nor across a session switch; a new prompt
+  clears it server-side.
+- Shipped notes: `extractNextSteps` in agent-manager.js parses the closing
+  assistant text + result summary (`## Next steps`, `**Suggested next
+  steps:**`, numbered/bulleted lists, inline "Next steps: …", markdown
+  stripped, items ≥ 5 chars, cap 3 × 240). Fallback chain: failed run →
+  "reread the error output…"; `git status` dirty → "review the uncommitted
+  changes, run the tests"; else → "draft a commit message + list unfinished
+  work". `suggestToken` guards the async git probe against a newer run.
+  Client keeps `state.suggest[iid]` synced from status broadcasts; the
+  overlay is a pointer-events-none div over the textarea (only ever visible
+  over an empty box, so no metric sync needed; the placeholder is hidden
+  beneath it via `.ghosted`). Verified on a scratch copy of the data on
+  port 1970 (the user's 1969 instance untouched): extraction unit checks,
+  scripted result events through a stub CLI, and a headless Chrome pass of
+  ghost → Tab → send; details in the session log.
