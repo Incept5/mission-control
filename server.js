@@ -106,6 +106,66 @@ app.get('/api/ollama-models', wrap(async (req, res) => {
   res.json({ base, models });
 }));
 
+// Register-form helper: the model aliases a LiteLLM proxy serves
+// (GET <base>/v1/models, Bearer auth) — the spark cluster preset's
+// counterpart to the Ollama list above. The proxy only accepts the
+// aliases it has deployed, so the form offers those instead of a
+// hardcoded guess. The key comes from the token file the "Save key…"
+// flow wrote (path passed as ?file= and read here, so the key never
+// rides a URL; ~/.config only) or, if the row holds a pasted value, as
+// ?token= raw. LiteLLM runs without a database, so anything but the
+// master key fails with "No connected db." rather than a 401 — the
+// error body is surfaced to make that visible.
+app.get('/api/litellm-models', wrap(async (req, res) => {
+  const base = String(req.query.base || '').trim() || 'http://spark1:4000';
+  let url;
+  try {
+    url = new URL(base);
+  } catch {
+    throw Object.assign(new Error(`"${base}" is not a URL`), { status: 400 });
+  }
+  if (url.protocol !== 'http:' && url.protocol !== 'https:') {
+    throw Object.assign(new Error('base must be an http(s) URL'), { status: 400 });
+  }
+  let token = String(req.query.token || '').trim();
+  const file = String(req.query.file || '').trim();
+  if (file) {
+    const full = file.startsWith('~') ? path.join(os.homedir(), file.slice(1)) : path.resolve(file);
+    if (!full.startsWith(path.join(os.homedir(), '.config') + path.sep)) {
+      throw Object.assign(new Error('token file must live under ~/.config'), { status: 400 });
+    }
+    let text = '';
+    try { text = fs.readFileSync(full, 'utf8').trim(); } catch {}
+    if (!text) throw Object.assign(new Error(`no key found in ${file} — store one with "🔑 Save key…" first`), { status: 400 });
+    token = text;
+  }
+  if (!token) {
+    throw Object.assign(new Error('no key to list models with — store one with "🔑 Save key…" or paste it into the token row'), { status: 400 });
+  }
+  url.pathname = url.pathname.replace(/\/+$/, '') + '/v1/models';
+  let response;
+  try {
+    response = await fetch(url, {
+      headers: { authorization: `Bearer ${token}` },
+      signal: AbortSignal.timeout(5000),
+    });
+  } catch (err) {
+    throw Object.assign(new Error(`Could not reach ${base} — is the cluster on the tailnet? (${err.message})`), { status: 502 });
+  }
+  if (!response.ok) {
+    const body = await response.text().catch(() => '');
+    throw Object.assign(
+      new Error(`LiteLLM at ${base} answered ${response.status}${body.trim() ? `: ${body.trim().slice(0, 200)}` : ''}`),
+      { status: 502 },
+    );
+  }
+  const data = await response.json();
+  const models = (data.data || [])
+    .map((m) => ({ value: String(m.id || ''), label: String(m.id || '') }))
+    .filter((m) => m.value);
+  res.json({ base, models });
+}));
+
 app.post('/api/agents', wrap((req, res) => {
   res.json(manager.addAgent(req.body || {}));
 }));

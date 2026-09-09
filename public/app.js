@@ -736,12 +736,42 @@ async function openAgentForm(agent) {
     return false;
   }
 
-  // Presets flagged `discover` (Ollama) read their model list from the
-  // provider itself: Ollama's API only takes full name:tag values, so a
-  // hardcoded guess 404s at run time even though the model is pulled. The
-  // first ticked model also fills the ANTHROPIC_DEFAULT_*_MODEL rows — the
-  // aliases Claude Code resolves for sub-agents and background calls.
+  // Presets flagged `discover` (Ollama, LiteLLM) read their model list from
+  // the provider itself: both APIs only take exactly what they serve —
+  // Ollama full name:tag values, a LiteLLM proxy its deployed aliases — so
+  // a hardcoded guess 404s at run time. The first ticked model also fills
+  // the ANTHROPIC_DEFAULT_*_MODEL rows — the aliases Claude Code resolves
+  // for sub-agents and background calls — unless the preset pins those
+  // roles itself (spark: a main model plus a small background one).
   async function discoverModels(preset) {
+    const rowFor = (key) => env.rows().find((r) => r._inputs.key.value.trim() === key);
+    if (preset.discover === 'litellm') {
+      // The proxy wants its master key: a file row sends the path (the
+      // server reads it there, so the key never rides the URL), a value
+      // row sends what was pasted.
+      const base = rowFor('ANTHROPIC_BASE_URL')?._inputs.value.value.trim() || 'http://spark1:4000';
+      const auth = rowFor('ANTHROPIC_AUTH_TOKEN');
+      let authQs = '';
+      if (auth) {
+        const v = auth._inputs.value.value.trim();
+        if (v) authQs = auth._inputs.mode.value === 'file'
+          ? '&file=' + encodeURIComponent(v)
+          : '&token=' + encodeURIComponent(v);
+      }
+      setModelsNote(`Reading model aliases from ${base}…`);
+      try {
+        const out = await api('/api/litellm-models?base=' + encodeURIComponent(base) + authQs);
+        modelCandidates = out.models;
+        renderModelChecks();
+        syncDiscoveredDefaults();
+        setModelsNote(out.models.length
+          ? `${out.models.length} aliases served by ${out.base} — the exact model ids the proxy accepts`
+          : `No model aliases at ${out.base} — check what the cluster has deployed`);
+      } catch (err) {
+        setModelsNote(`${err.message} — models can also be added by hand below.`);
+      }
+      return;
+    }
     let base = '';
     for (const row of env.rows()) {
       if (row._inputs.key.value.trim() === 'ANTHROPIC_BASE_URL') base = row._inputs.value.value.trim();
@@ -761,7 +791,10 @@ async function openAgentForm(agent) {
     }
   }
   function syncDiscoveredDefaults() {
-    if (!activePreset?.discover) return;
+    // A preset that pins the DEFAULT_* rows itself (spark's main +
+    // background models) keeps them — discovery curates the tick list,
+    // not the roles.
+    if (!activePreset?.discover || activePreset.pinModelRoles) return;
     const first = modelCandidates.find((m) => m.box?.checked) || modelCandidates[0];
     if (!first) return;
     for (const key of ['ANTHROPIC_DEFAULT_OPUS_MODEL', 'ANTHROPIC_DEFAULT_SONNET_MODEL', 'ANTHROPIC_DEFAULT_HAIKU_MODEL']) {
@@ -914,6 +947,9 @@ async function openAgentForm(agent) {
         row._inputs.value.value = out.file;
         toast(`${out.created ? 'Created' : 'Updated'} ${out.file}`);
         close();
+        // With the key now on disk, discovery can read the provider's
+        // model list (LiteLLM needs it; for Ollama it just refreshes).
+        if (activePreset?.discover) discoverModels(activePreset);
       } catch (err) {
         if (/already exists/.test(err.message) && confirm(`${err.message}\nOverwrite it?`)) return save(true);
         toast(err.message, true);
@@ -1061,7 +1097,11 @@ async function openAgentForm(agent) {
       node: section('Connection', 'The spawned CLI reads these. Presets fill everything but the token; "🔑 Save key…" stores a pasted key in ~/.config/<dir>/token so Mission Control only keeps the path.',
         env.node),
     },
-    { title: 'Models', node: modelsNode },
+    { title: 'Models', node: modelsNode, onShow: () => {
+      // Discovery may have found nothing on the first pass (the key wasn't
+      // saved yet, or the path was typed by hand) — retry on arrival.
+      if (activePreset?.discover && !modelCandidates.length) discoverModels(activePreset);
+    } },
     { title: 'Billing', node: billingNode },
   ];
   let stepIdx = 0;
@@ -1085,6 +1125,7 @@ async function openAgentForm(agent) {
   }
   function renderStep() {
     stepBody.replaceChildren(steps[stepIdx].node);
+    steps[stepIdx].onShow?.();
     dots.replaceChildren(...steps.map((s, i) => el('button', {
       class: 'wiz-dot' + (i === stepIdx ? ' active' : i < stepIdx ? ' done' : ''),
       type: 'button', title: `${i + 1}. ${s.title}`, onclick: () => go(i),

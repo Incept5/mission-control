@@ -742,3 +742,62 @@ wrong.
   headless-Chrome pass (contextual ghost renders, no cycling hint for a
   single item, Tab fills). codex/gemini/opencode oneShots mirror their
   `send` invocations but were stub-verified only, like M7.
+
+---
+
+# Round 8 — direct request 2026-09-09
+
+Not an interview: the user brought connection notes for the remote spark
+cluster (spark1, a LiteLLM proxy fronting open Qwen models over
+Tailscale) and asked for it to be registerable the way other harness
+providers are — key first, then the wizard's usual steps.
+
+### M24 — Spark cluster provider preset  ✅ shipped 2026-09-09
+- `spark` preset in `lib/presets.js`: base `http://spark1:4000`, master
+  key at `~/.config/spark1/token` (🔑 flow, `tokenDir: 'spark1'`),
+  `API_TIMEOUT_MS=600000`, and the per-agent pins the cluster notes call
+  for — `CLAUDE_CODE_MAX_CONTEXT_TOKENS=172000`,
+  `CLAUDE_CODE_EFFORT_LEVEL=medium` (LiteLLM forwards effort as
+  reasoning_effort; qwen3.8-27b takes low/medium/xhigh, and the global
+  xhigh arrives as "high" and is rejected — so the pin must be
+  per-invocation, which the adapter's env layering already guarantees),
+  `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1`. Model roles pinned rather
+  than first-ticked (`pinModelRoles`): qwen3.8-27b main,
+  qwen3.6-35b small/fast for the haiku role. Pricing stamps runs to $0
+  (self-hosted, like local Ollama).
+- `GET /api/litellm-models`: `GET <base>/v1/models` with Bearer auth,
+  the spark counterpart of the Ollama list. Key comes from a `?file=`
+  path read server-side (never rides a URL; `~/.config`-only, like the
+  token writer) or raw `?token=` when the row holds a pasted value.
+  LiteLLM runs without a database, so a wrong key answers "No connected
+  db." rather than 401 — the error body is surfaced to say so.
+- Wizard wiring: `discover: 'litellm'` branch in `discoverModels` (base +
+  auth row → file/token param); discovery re-fires after 🔑 saves the
+  key and on entering the Models step while the list is still empty, so
+  the no-key-yet first pass self-heals; `syncDiscoveredDefaults` skips
+  presets that pin their roles.
+- Fix exposed by the preset: the registry's secret-key mask caught
+  `CLAUDE_CODE_MAX_CONTEXT_TOKENS` ("…TOKENS"), hiding a plain number as
+  a masked secret in the dashboard/edit form. Exempted that one name;
+  the mask stays fail-closed for everything else.
+- Verified on the port-1970 scratch instance against a stub LiteLLM
+  (`/health/liveliness`, `/v1/models`, "No connected db." on a wrong
+  key): endpoint matrix (no key / missing file / outside ~/.config /
+  wrong key / right key / unreachable / bad URL), preset exposure, a
+  full registration round-trip, an adapter spawn with a stub `claude`
+  dumping its env (parent `CLAUDE_CODE_*` stripped — xhigh and a 999999
+  context did not survive — agent pins layered, token read from file at
+  spawn), and a 13-check headless-Chrome walk of the wizard: preset
+  pre-fill, no-key note on first Models visit, 🔑 save → auto
+  re-discovery, 2 models ticked, roles pinned through discovery, billing
+  pre-stamped, registration lands on the agent page. Live spark1 checks
+  pending: Tailscale was down on the laptop at ship time.
+
+## Standing decisions (new)
+
+- **Spark pins live in the agent env, not in shell profiles.** The
+  i5c alias puts them in `~/.zprofile`/`~/.zshrc` for human shells;
+  Mission Control's equivalent is the preset's env block — the adapter
+  strips parent `CLAUDE_CODE_*` and layers the agent's own, so each
+  agent carries its pins and the effort fix stays scoped where the
+  cluster notes require it.
