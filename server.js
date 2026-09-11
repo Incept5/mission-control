@@ -117,7 +117,7 @@ app.get('/api/ollama-models', wrap(async (req, res) => {
 // master key fails with "No connected db." rather than a 401 — the
 // error body is surfaced to make that visible.
 app.get('/api/litellm-models', wrap(async (req, res) => {
-  const base = String(req.query.base || '').trim() || 'http://spark1:4000';
+  const base = String(req.query.base || '').trim() || 'https://inference.incept5.com';
   let url;
   try {
     url = new URL(base);
@@ -150,7 +150,7 @@ app.get('/api/litellm-models', wrap(async (req, res) => {
       signal: AbortSignal.timeout(5000),
     });
   } catch (err) {
-    throw Object.assign(new Error(`Could not reach ${base} — is the cluster on the tailnet? (${err.message})`), { status: 502 });
+    throw Object.assign(new Error(`Could not reach ${base} (${err.message})`), { status: 502 });
   }
   if (!response.ok) {
     const body = await response.text().catch(() => '');

@@ -749,7 +749,7 @@ async function openAgentForm(agent) {
       // The proxy wants its master key: a file row sends the path (the
       // server reads it there, so the key never rides the URL), a value
       // row sends what was pasted.
-      const base = rowFor('ANTHROPIC_BASE_URL')?._inputs.value.value.trim() || 'http://spark1:4000';
+      const base = rowFor('ANTHROPIC_BASE_URL')?._inputs.value.value.trim() || 'https://inference.incept5.com';
       const auth = rowFor('ANTHROPIC_AUTH_TOKEN');
       let authQs = '';
       if (auth) {
