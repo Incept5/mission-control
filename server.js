@@ -160,9 +160,13 @@ app.get('/api/litellm-models', wrap(async (req, res) => {
     );
   }
   const data = await response.json();
+  // whisper-* (transcription) and kokoro (speech synthesis) are the cluster's
+  // audio tier — they can't answer a chat, so they never belong among the
+  // --model choices on the register form.
+  const NON_CHAT = [/^whisper[-_]/i, /^kokoro($|[-_])/i];
   const models = (data.data || [])
     .map((m) => ({ value: String(m.id || ''), label: String(m.id || '') }))
-    .filter((m) => m.value);
+    .filter((m) => m.value && !NON_CHAT.some((re) => re.test(m.value)));
   res.json({ base, models });
 }));
 
