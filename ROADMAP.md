@@ -801,3 +801,51 @@ providers are — key first, then the wizard's usual steps.
   strips parent `CLAUDE_CODE_*` and layers the agent's own, so each
   agent carries its pins and the effort fix stays scoped where the
   cluster notes require it.
+
+---
+
+# Round 9 — direct request 2026-09-23
+
+Not an interview: the user asked to explore jev (TypeSafe's typed decision
+model on OpenRouter) as a per-task model router — spend sonnet/GLM money on
+tasks that don't need fable/opus — then greenlit the suggestion badge on the
+experiment's results.
+
+### M25 — Jev model-routing suggestion  ✅ shipped 2026-09-23
+- Groundwork: `scripts/jev-router-experiment.mjs` — 12 hand-labelled
+  mission-control-shaped prompts through jev's Decisions API. 10/12 exact
+  agreement ($0.00003 per decision, ~350ms), both misses defensible (jev
+  picked sonnet where we said opus/fable — it under-spends, never
+  over-spends, so "when do we need fable" stays a human call). Stability
+  probe: high-confidence picks are stable; below ~0.8 confidence the choice
+  flips run-to-run — that threshold became the borderline rule.
+- `lib/jev.js` + `POST /api/jev/route`: takes the drafted prompt and the
+  dropdown's real options, builds jev `choice` criteria keyed by those
+  values (each described by its tier's policy text — the policy lives in
+  this file, jev only applies it), returns pick/tier/confidence/
+  probabilities/cost. Fails soft as `unavailable` (no key, upstream error)
+  so the badge just doesn't show; only malformed input 400s.
+- Badge on the agent page header: drafts of 60+ chars are rated 1.2s after
+  typing stops (frontend-cached per draft+menu), showing `✦ sonnet 97%` or
+  `✦ borderline → sonnet` (confidence < 0.8 → recommend the first
+  sonnet-tier option; hover shows top-2 probabilities and cost). Click
+  applies it through the dropdown's own PUT — a suggestion, never an
+  auto-switch. Badge hides on edit/send/instance switch.
+- Key handling: `OPENROUTER_API_KEY` or `~/.config/openrouter/key` (the 🔑
+  flow's path convention), read server-side only; `modelOptions` comes from
+  the settings schema the dropdown itself uses, so suggestion and menu
+  can't drift apart. Same key is the prerequisite for a future `openrouter`
+  preset (GLM 5.3 direct) — not built here.
+- Verified on the port-1970 scratch instance: endpoint matrix live
+  (confident sonnet@0.97, borderline opus@0.54 → defaultTo sonnet,
+  mechanical → glm@0.97, single-option trivial, no-prompt 400,
+  frontend-shaped payload with the empty "Default" row filtered),
+  `node --check` on all three files, headless-Chrome boot of the dashboard.
+  Badge interaction code-read only — no browser automation in the repo.
+
+## Standing decisions (new)
+
+- **Model routing is advisory, not automatic.** jev picks, the human
+  applies; borderline answers recommend the sonnet tier rather than a coin
+  flip between contenders. Auto-switching per spawn was rejected on the
+  flip evidence.

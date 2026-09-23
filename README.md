@@ -67,6 +67,15 @@ Then open **http://localhost:1969** (Apollo 11 vintage — override with `PORT=x
 - **Prompt library** — ☰ in the composer lists saved prompts (global or scoped
   to the agent's current project) and inserts them; "Manage prompts…" adds,
   edits, and deletes (stored in `data/prompts.json`).
+- **Jev routing suggestion** — as a draft settles (60+ chars), the cheapest
+  adequate model for it is chosen by `typesafe/jev-1.13` (OpenRouter Decisions
+  API) among the dropdown's own options and shown next to the header model
+  dropdown: `✦ sonnet 97%`, or `✦ borderline → sonnet` when confidence is
+  under 0.8 — the zone where the pick flips run-to-run, so the workhorse tier
+  is recommended instead. Click the pill to apply it (from the next message);
+  it is a suggestion, never an auto-switch. ~$0.00003 per rating, cached per
+  draft (`POST /api/jev/route`; needs an OpenRouter key at
+  `~/.config/openrouter/key` or in `OPENROUTER_API_KEY` — no key, no badge).
 - **Voice prompting** — 🎤 in the composer, picked per use: record a clip that
   the server transcribes with the Whisper API (set your OpenAI key from the
   picker's "Whisper settings…"), or dictate live with the browser's built-in

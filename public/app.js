@@ -17,6 +17,9 @@ const state = {
   attach: {},            // iid -> staged uploads / file references for the next message
   drafts: {},            // iid -> unsent composer text, survives instance switches
   suggest: {},           // iid -> composer ghost suggestion { at, cid, items, idx, dismissed }
+  jev: {},               // iid -> { timer } for the debounced routing-suggestion call
+  jevCache: {},          // "iid|modelSig|draft" -> /api/jev/route response (evicted oldest-first)
+  modelOptions: {},      // iid -> model dropdown options from the settings schema
   skillsCache: {},       // iid -> { at, items } for the composer's `/` picker
   sessionSel: {},        // iid -> selected session cid
   agentCid: {},          // iid -> last seen conversation id (change detection)
@@ -3071,6 +3074,7 @@ function renderAgentPage(agent) {
         el('span', { class: 'header-task', id: 'hdr-task' }, ...headerTaskNodes(st)),
         el('select', { class: 'hdr-model', id: 'hdr-model', title: 'Model (this instance)' },
           el('option', {}, modelLabel(st))),
+        el('button', { class: 'jev-badge hidden', id: 'hdr-jev', title: '' }, ''),
         el('div', { class: 'tabs' },
           tabs.map(([key, label]) =>
             el('button', {
@@ -3107,8 +3111,12 @@ async function populateModelSelect(agent) {
   const field = settings.schema.find((f) => f.key === 'model');
   if (!field || !field.options?.length) {
     sel.hidden = true;
+    delete state.modelOptions[agent.id];
     return;
   }
+  // The jev router picks among exactly these options — keep the copy the
+  // dropdown shows so suggestion and menu can never drift apart.
+  state.modelOptions[agent.id] = field.options;
   sel.replaceChildren(
     ...(field.options || []).map((opt) =>
       el('option', { value: opt.value, selected: (settings.values.model || '') === opt.value ? '' : null },
@@ -3123,6 +3131,82 @@ async function populateModelSelect(agent) {
       toast(err.message, true);
     }
   };
+}
+
+/* ── Jev routing suggestion ─────────────────────────────────────────
+ * Once a draft settles, ask the decision model which model should run it
+ * and show the pick next to the header dropdown (click to apply). The
+ * badge is a suggestion only — applying it is a human click, and a
+ * borderline answer (confidence < 0.8, where the pick flips run-to-run)
+ * recommends the sonnet tier instead of jev's raw choice. */
+
+function scheduleJev(agent, input) {
+  const j = (state.jev[agent.id] = state.jev[agent.id] || {});
+  clearTimeout(j.timer);
+  hideJevBadge();
+  const draft = input.value.trim();
+  const options = (state.modelOptions[agent.id] || []).filter((o) => o.value);
+  // Below ~60 chars there is too little task to judge, and with fewer than
+  // two real options there is nothing to choose between.
+  if (draft.length < 60 || options.length < 2) return;
+  j.timer = setTimeout(() => rateJev(agent, draft, options), 1200);
+}
+
+async function rateJev(agent, draft, options) {
+  const sig = options.map((o) => o.value).join(',');
+  const key = `${agent.id}|${sig}|${draft}`;
+  let out = state.jevCache[key];
+  if (!out) {
+    try {
+      out = await api('/api/jev/route', { method: 'POST', body: { prompt: draft, models: options } });
+    } catch { return; }   // endpoint problems just leave the badge hidden
+    const cached = Object.keys(state.jevCache);
+    if (cached.length >= 60) delete state.jevCache[cached[0]];
+    state.jevCache[key] = out;
+  }
+  if (out.trivial || out.unavailable) return;
+  // The draft (or the whole chat) may have moved on while the call was out.
+  if (($('#composer-input')?.value || '').trim() !== draft) return;
+  showJevBadge(agent, out);
+}
+
+function shortModel(v) {
+  const m = /(fable|opus|sonnet|haiku|glm|qwen|deepseek|kimi)/i.exec(v);
+  return m ? m[1].toLowerCase() : (v.length > 18 ? v.slice(0, 17) + '…' : v);
+}
+
+function showJevBadge(agent, out) {
+  const badge = $('#hdr-jev');
+  if (!badge) return;
+  const recommended = (out.borderline && out.defaultTo) || out.model;
+  const top2 = Object.entries(out.probabilities || {}).sort((a, b) => b[1] - a[1]).slice(0, 2)
+    .map(([v, p]) => `${v} ${(p * 100).toFixed(0)}%`).join(' · ');
+  badge.className = 'jev-badge' + (out.borderline ? ' borderline' : '');
+  badge.textContent = out.borderline
+    ? `✦ borderline → ${shortModel(recommended)}`
+    : `✦ ${shortModel(out.model)} ${Math.round((out.confidence || 0) * 100)}%`;
+  badge.title =
+    `jev routing suggestion — tier: ${out.tier}, confidence ${(out.confidence ?? 0).toFixed(2)}` +
+    (out.cost != null ? `, cost $${out.cost.toFixed(6)}` : '') +
+    (top2 ? `\n${top2}` : '') +
+    `\nClick to set ${recommended}; applies from the next message`;
+  badge.onclick = () => {
+    const sel = $('#hdr-model');
+    if (!sel || ![...sel.options].some((o) => o.value === recommended)) return;
+    sel.value = recommended;
+    sel.dispatchEvent(new Event('change'));   // reuses the dropdown's own PUT + toast
+    badge.classList.add('applied');
+  };
+  badge.classList.remove('hidden');
+}
+
+function hideJevBadge() {
+  const badge = $('#hdr-jev');
+  if (badge) {
+    badge.classList.add('hidden');
+    badge.classList.remove('applied');
+    badge.onclick = null;
+  }
 }
 
 // Header line while a run is active: origin chip, the prompt, and the clock.
@@ -3718,6 +3802,7 @@ function renderChat(agent, body) {
     state.drafts[agent.id] = input.value;
     updateSuggestGhost(agent.id);
     updateSlash();
+    scheduleJev(agent, input);
   });
   input.addEventListener('click', updateSlash);
   input.addEventListener('blur', closeSlash);
@@ -3825,6 +3910,8 @@ function renderChat(agent, body) {
     input.style.height = 'auto';
     state.drafts[agent.id] = '';
     updateSuggestGhost(agent.id);   // a sent message retires the ghost now, not on the next status broadcast
+    clearTimeout((state.jev[agent.id] || {}).timer);   // and the pending jev rating with it
+    hideJevBadge();
     try {
       const result = await api(`/api/instances/${agent.id}/chat`, { method: 'POST', body: { message: text } });
       if (result.queued) toast(`Queued — position ${result.position}`);

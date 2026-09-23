@@ -354,6 +354,21 @@ a.hdr-chip:hover { color: var(--text); border-color: var(--accent); }
   max-width: 240px;
 }
 .hdr-model:hover, .hdr-model:focus { color: var(--text); border-color: var(--accent); }
+/* Jev routing suggestion — pill next to the model dropdown; click applies. */
+.jev-badge {
+  background: var(--panel-2);
+  border: 1px solid rgba(52, 211, 153, .4);
+  border-radius: 8px;
+  color: var(--green);
+  font-family: var(--mono); font-size: 11px;
+  padding: 5px 8px;
+  cursor: pointer;
+  white-space: nowrap;
+}
+.jev-badge:hover { border-color: var(--green); color: var(--text); }
+.jev-badge.borderline { color: var(--amber); border-color: rgba(251, 191, 36, .4); }
+.jev-badge.borderline:hover { border-color: var(--amber); }
+.jev-badge.applied { color: var(--text); border-color: var(--green); box-shadow: 0 0 6px rgba(52, 211, 153, .35); }
 .tabs { display: flex; gap: 2px; margin-left: auto; background: var(--panel-2); border-radius: 10px; padding: 3px; }
 .tab {
   padding: 6px 14px; border-radius: 8px; border: none;

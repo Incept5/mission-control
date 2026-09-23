@@ -12,6 +12,7 @@ const TelegramBot = require('./lib/telegram-bot');
 const claudeStore = require('./lib/claude-store');
 const cliSessions = require('./lib/cli-sessions');
 const voice = require('./lib/voice');
+const jev = require('./lib/jev');
 const agentsConfig = require('./agents.config');
 
 const PORT = process.env.PORT || 1969;
@@ -168,6 +169,15 @@ app.get('/api/litellm-models', wrap(async (req, res) => {
     .map((m) => ({ value: String(m.id || ''), label: String(m.id || '') }))
     .filter((m) => m.value && !NON_CHAT.some((re) => re.test(m.value)));
   res.json({ base, models });
+}));
+
+// Jev routing suggestion: rates a drafted prompt and picks the cheapest
+// adequate model among the instance dropdown's real options (sent by the
+// client — it already has them from the settings schema). Stateless and
+// fail-soft: a missing key or upstream outage returns `unavailable` and the
+// badge simply doesn't show.
+app.post('/api/jev/route', wrap(async (req, res) => {
+  res.json(await jev.suggestModel(req.body || {}));
 }));
 
 app.post('/api/agents', wrap((req, res) => {
