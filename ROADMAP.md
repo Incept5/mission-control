@@ -841,7 +841,15 @@ experiment's results.
   mechanical → glm@0.97, single-option trivial, no-prompt 400,
   frontend-shaped payload with the empty "Default" row filtered),
   `node --check` on all three files, headless-Chrome boot of the dashboard.
-  Badge interaction code-read only — no browser automation in the repo.
+  Badge interaction browser-verified 2026-09-24 via CDP (repo's `ws` as the
+  client, `--remote-debugging-port` Chrome): on a Claude Code instance
+  (multi-tier fallback menu Default/sonnet/opus/haiku) a confident draft
+  rendered `✦ sonnet 85%` (green) and a refactor draft rendered
+  `✦ borderline → sonnet` (amber, jev's raw pick opus@0.40 in the
+  tooltip) — in both the model select stayed untouched; screenshots in
+  the session log. Gotcha for reruns: a `#` in the `/json/new` query
+  string gets percent-encoded into the path — open the tab bare and
+  `Page.navigate` the hash route instead.
 
 ## Standing decisions (new)
 
