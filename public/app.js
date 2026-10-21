@@ -752,14 +752,16 @@ async function openAgentForm(agent) {
   // roles itself (spark: a main model plus a small background one).
   async function discoverModels(preset) {
     const rowFor = (key) => env.rows().find((r) => r._inputs.key.value.trim() === key);
-    if (preset.discover === 'litellm') {
+    if (preset.discover === 'litellm' || preset.discover === 'lmstudio') {
+      const keyless = preset.discover === 'lmstudio';
       // The proxy wants its master key: a file row sends the path (the
       // server reads it there, so the key never rides the URL), a value
       // row sends what was pasted.
-      const base = rowFor('ANTHROPIC_BASE_URL')?._inputs.value.value.trim() || 'https://inference.incept5.com';
+      const base = rowFor('ANTHROPIC_BASE_URL')?._inputs.value.value.trim()
+        || (keyless ? 'http://localhost:1234' : 'https://inference.incept5.com');
       const auth = rowFor('ANTHROPIC_AUTH_TOKEN');
-      let authQs = '';
-      if (auth) {
+      let authQs = keyless ? '&open=1' : '';
+      if (auth && !keyless) {
         const v = auth._inputs.value.value.trim();
         if (v) authQs = auth._inputs.mode.value === 'file'
           ? '&file=' + encodeURIComponent(v)
@@ -773,7 +775,7 @@ async function openAgentForm(agent) {
         syncDiscoveredDefaults();
         setModelsNote(out.models.length
           ? `${out.models.length} aliases served by ${out.base} — the exact model ids the proxy accepts`
-          : `No model aliases at ${out.base} — check what the cluster has deployed`);
+          : `No model aliases at ${out.base} — check what the ${keyless ? 'server has loaded' : 'cluster has deployed'}`);
       } catch (err) {
         setModelsNote(`${err.message} — models can also be added by hand below.`);
       }

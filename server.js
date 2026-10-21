@@ -118,6 +118,9 @@ app.get('/api/ollama-models', wrap(async (req, res) => {
 // master key fails with "No connected db." rather than a 401 — the
 // error body is surfaced to make that visible.
 app.get('/api/litellm-models', wrap(async (req, res) => {
+  // ?open=1: a keyless OpenAI-style server (LM Studio) — same /v1/models
+  // listing, no Bearer, embedding models dropped as well.
+  const open = req.query.open === '1';
   const base = String(req.query.base || '').trim() || 'https://inference.incept5.com';
   let url;
   try {
@@ -140,14 +143,14 @@ app.get('/api/litellm-models', wrap(async (req, res) => {
     if (!text) throw Object.assign(new Error(`no key found in ${file} — store one with "🔑 Save key…" first`), { status: 400 });
     token = text;
   }
-  if (!token) {
+  if (!token && !open) {
     throw Object.assign(new Error('no key to list models with — store one with "🔑 Save key…" or paste it into the token row'), { status: 400 });
   }
   url.pathname = url.pathname.replace(/\/+$/, '') + '/v1/models';
   let response;
   try {
     response = await fetch(url, {
-      headers: { authorization: `Bearer ${token}` },
+      headers: token ? { authorization: `Bearer ${token}` } : {},
       signal: AbortSignal.timeout(5000),
     });
   } catch (err) {
@@ -164,7 +167,7 @@ app.get('/api/litellm-models', wrap(async (req, res) => {
   // whisper-* (transcription) and kokoro (speech synthesis) are the cluster's
   // audio tier — they can't answer a chat, so they never belong among the
   // --model choices on the register form.
-  const NON_CHAT = [/^whisper[-_]/i, /^kokoro($|[-_])/i];
+  const NON_CHAT = [/^whisper[-_]/i, /^kokoro($|[-_])/i, ...(open ? [/embed/i] : [])];
   const models = (data.data || [])
     .map((m) => ({ value: String(m.id || ''), label: String(m.id || '') }))
     .filter((m) => m.value && !NON_CHAT.some((re) => re.test(m.value)));

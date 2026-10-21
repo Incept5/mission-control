@@ -93,7 +93,8 @@ Then open **http://localhost:1969** (Apollo 11 vintage — override with `PORT=x
   gone). "+ Register agent" at the bottom of the sidebar opens a short
   **wizard**: harness & provider (card picks — for Claude Code, provider
   presets from `lib/presets.js`: DeepSeek, Kimi, z.ai GLM, the spark
-  cluster's LiteLLM proxy, local Ollama, or "Other" with the env var
+  cluster's LiteLLM proxy, local Ollama, Ollama or LM Studio on another
+  machine on the LAN (e.g. the Mac mini — edit the base URL, no key), or "Other" with the env var
   names pre-filled. The Ollama and spark presets are `discover`-flagged:
   the wizard reads the models the provider actually serves
   (`GET /api/ollama-models`, `GET /api/litellm-models`) — Ollama's API
