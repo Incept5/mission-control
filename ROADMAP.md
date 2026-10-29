@@ -921,3 +921,80 @@ then took the proposed defaults for the open questions.
 - **MC → Hermes only.** Hermes calling MC agents is out of scope.
 - Follow-ups not built: streaming via `/api/sessions/<id>/chat/stream`,
   per-agent display of Hermes's skills/toolsets (`/v1/skills`).
+
+# Round 11 — direct request 2026-10-29
+
+Not an interview either: the user asked for the OpenClaw agent on the
+Raspberry Pi ("ai-server", `192.168.1.103`) to be set up like M28's Hermes
+agent, then answered the open questions in flight (target agent: zeus;
+Tailscale approved on the Pi).
+
+### M29 — OpenClaw agent type  ✅ shipped 2026-10-29
+- Transport: the OpenClaw gateway multiplexes HTTP on its gateway port and
+  can serve an **OpenAI-compatible chat completions API**
+  (`docs/gateway/openai-http-api.md`, shipped in the install), disabled by
+  default. Pi runs v2026.5.7 as a **user** service; gateway binds loopback,
+  and Tailscale Serve (`gateway.tailscale.mode: "serve"`) fronts it at
+  `https://ai-server.story-turtle.ts.net` — so unlike M28 the bearer key
+  travels over TLS, not plain tailnet HTTP.
+- `lib/adapters/openclaw.js` (type `openclaw`), the second HTTP adapter:
+  env `OPENCLAW_BASE_URL` + `OPENCLAW_API_KEY` (string or `{ file }`,
+  `~/.config/openclaw/token` by convention).
+  - Availability: `GET /v1/models` with the key; the ids are **agent
+    targets** (`openclaw`, `openclaw/zeus`, `openclaw/simone-bot`), not
+    provider models. A configured model row wins over discovery, so
+    registering with `openclaw/zeus` first makes MC talk to zeus.
+  - Turn: `POST /v1/chat/completions` with `user` = a per-conversation
+    `mc_<ts>_<rand>` key — the gateway derives its session key from `user`,
+    so MC never shares the WhatsApp/Telegram threads. Archived session
+    (409) re-mints once. Aborting the request cancels the agent run on the
+    gateway (documented). 10-minute cap; usage maps prompt/completion →
+    the result event; cost not tracked (OpenClaw bills its own provider).
+- Preset "OpenClaw (LAN or Tailscale)" in `lib/presets.js`, defaulting to
+  the ts.net URL and the token file, with the enable recipe in comments.
+- Verified: mock-gateway matrix first (25 checks — wrong key 401 →
+  offline, session continuity via `user`, 409 recreate, upstream 500
+  surfaced, stop mid-turn, unreachable host, missing-config hints), full
+  E2E on a port-1970 scratch instance, then against the **real gateway**:
+  two turns where zeus recalled a codename across turns (session
+  continuity proven; ~18.8k input tokens per turn — zeus's own system
+  prompt and tools), and a live 7/7 E2E with the configured target
+  winning.
+- Enabled on the Pi 2026-10-29: config backed up to
+  `openclaw.json.bak-pre-chatcompletions`, then
+  `openclaw config set gateway.http.endpoints.chatCompletions.enabled true`
+  (the official CLI, not hand-edited JSON); gateway restarted with
+  `systemctl --user restart openclaw-gateway` (user unit — `sudo
+  systemctl` says "not found"; linger is on, so it survives logout);
+  token copied to `~/.config/openclaw/token` here (hash-checked both ends,
+  mode 600, never printed).
+- Detour (why this took a troubleshooting turn): the Pi had been off the
+  air and Tailscale on it was **logged out for 39 days** (key expiry) —
+  the user re-authed. "No internet on the Pi" was stale: post-reboot,
+  ICMP/DNS/TLS/Firefox-headless all passed from the box. DF-1472 ping loss
+  is PPPoE (path MTU 1492) with the router clamping TCP — cosmetic. WiFi
+  power-save is on; persistent journalling suggested, not done. The
+  `clawdbot-gateway` found at 127.0.0.1:18789 on the laptop is an old
+  local install (2026.1.24-3, pre-rename) that predates this HTTP API —
+  unrelated to the Pi.
+- Registered on the live :1969 dashboard after its restart: agent
+  `openclaw-pi`, key from the token file, model rows `openclaw/zeus`
+  (default) / `openclaw` / `openclaw/simone-bot`. Verified through the
+  dashboard itself: temp instance on the scratch project reached online,
+  one turn to zeus answered ("ready", 18.3k input tokens), status model
+  `openclaw/zeus`, instance closed after.
+
+## Standing decisions (new)
+
+- **Serve/TLS preferred over LAN HTTP.** Tailscale Serve keeps the gateway
+  on loopback and encrypts the key; a plain LAN base URL works but the
+  network is then the only protection (the M28 posture).
+- **MC gets its own session per conversation** (`user`-derived key), never
+  the channel threads; Clear session mints a new key.
+- **One registered agent per gateway; the target agent is a model row.**
+  zeus first; `openclaw` (default) or `openclaw/simone-bot` are one edit
+  away.
+- The key is an **operator credential** (the gateway's own docs warn this)
+  — key file convention, mode 600, never printed.
+- Follow-ups not built: streaming (`stream: true` SSE), skills/tools
+  surface, explicit `x-openclaw-session-key` control.
