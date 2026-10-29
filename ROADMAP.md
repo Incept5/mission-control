@@ -889,16 +889,25 @@ then took the proposed defaults for the open questions.
 - Preset "Hermes (LAN or Tailscale)" in `lib/presets.js`, defaulting to
   `http://hermess-mac-mini:8642`, key file `~/.config/hermes/token`, with
   the Hermes-side setup in the preset's env comment.
-- Verified against a mock Hermes (not the real one): adapter matrix
-  (online/offline, wrong key → offline + 401 surfaced in chat, session
-  recreate, stop mid-turn, unreachable host) and end to end on a
-  port-1970 instance with `MC_ROOT` pointed at a scratch dir — register
-  type `hermes`, launch an instance, chat, reply in history.
-- To go live (user's step, not done): on the mini set
-  `API_SERVER_ENABLED=true`, `API_SERVER_HOST=<tailnet or LAN address>`,
-  `API_SERVER_KEY=$(openssl rand -hex 32)` in `~/.hermes/.env`, restart the
-  gateway; put the same key in `~/.config/hermes/token` here and register
-  from the preset.
+- Verified against a mock Hermes first (adapter matrix: online/offline,
+  wrong key → offline + 401 surfaced in chat, session recreate, stop
+  mid-turn, unreachable host; end to end on a port-1970 instance with
+  `MC_ROOT` at a scratch dir), then against the **real Hermes** 2026-10-29:
+  online with model `hermes-agent`, unauthenticated `/v1/models` → 401, two
+  turns in one session with the second recalling the first (~14k input
+  tokens per turn — Hermes's own system prompt and tools).
+- Enabled on the mini 2026-10-29: `~/.hermes/.env` backed up to
+  `.env.bak-pre-apiserver`, then `API_SERVER_ENABLED=true`,
+  `API_SERVER_HOST=100.89.136.123` (tailnet address only — not the LAN
+  address, not 0.0.0.0), `API_SERVER_PORT=8642`, a random `API_SERVER_KEY`
+  (copied to `~/.config/hermes/token` here, mode 600, never printed);
+  gateway restarted via `hermes gateway restart`. `hermess-mac-mini`
+  resolves to that tailnet address from the laptop.
+- **Gotcha:** Hermes warns that the API endpoint runs agent work as the
+  host user with full terminal/file access (terminal backend is `local`).
+  Anyone holding the key has the same reach as the Telegram allowlist —
+  treat the key like a login. A sandboxed backend (`terminal.backend:
+  docker`) would narrow it; not done.
 
 ## Standing decisions (new)
 
