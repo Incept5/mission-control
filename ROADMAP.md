@@ -857,3 +857,58 @@ experiment's results.
   applies; borderline answers recommend the sonnet tier rather than a coin
   flip between contenders. Auto-switching per spawn was rejected on the
   flip evidence.
+
+---
+
+# Round 10 — direct request 2026-10-29
+
+Not an interview: the user asked for an agent that can talk to a Hermes agent
+(on the LAN or a remote network) the way Telegram and the other channels do,
+then took the proposed defaults for the open questions.
+
+### M28 — Hermes agent type  ✅ shipped 2026-10-29
+- Transport: Hermes's gateway has an API server platform
+  (`gateway/platforms/api_server*.py`, `API_SERVER_HOST/PORT/KEY`, Bearer
+  auth). It is the same gateway that serves Telegram, so MC is one more
+  channel. Probed on the mini (v0.22.1) 2026-10-29: present, **not enabled**
+  (no `API_SERVER_*` in `~/.hermes/.env`) — nothing on the mini was changed.
+- `lib/adapters/hermes.js` (type `hermes`): the first HTTP adapter, not a
+  CLI spawn. Config rides the agent's `env` block so registry, register form
+  and secret masking work unchanged: `HERMES_BASE_URL` and `HERMES_API_KEY`
+  (string or `{ file }`, `~/.config/hermes/token` by convention).
+  - Availability: `GET /v1/models` with the key — online only if reachable
+    *and* the key is accepted; the model name is read from it.
+  - Turn: `POST /api/sessions` once (id `mc_<ts>_<rand>`), then
+    `POST /api/sessions/<id>/chat {message}`; the reply arrives whole (no
+    streaming yet). 10-minute cap, Stop aborts the request. A 404 on the
+    session (pruned on the Hermes side) recreates it once.
+  - Session continuity: the adapter's `sessionId` is the Hermes session, so
+    it persists with the instance; Clear session starts a new one.
+  - Usage tokens go on the result event; cost is not tracked (Hermes bills
+    its own provider).
+- Preset "Hermes (LAN or Tailscale)" in `lib/presets.js`, defaulting to
+  `http://hermess-mac-mini:8642`, key file `~/.config/hermes/token`, with
+  the Hermes-side setup in the preset's env comment.
+- Verified against a mock Hermes (not the real one): adapter matrix
+  (online/offline, wrong key → offline + 401 surfaced in chat, session
+  recreate, stop mid-turn, unreachable host) and end to end on a
+  port-1970 instance with `MC_ROOT` pointed at a scratch dir — register
+  type `hermes`, launch an instance, chat, reply in history.
+- To go live (user's step, not done): on the mini set
+  `API_SERVER_ENABLED=true`, `API_SERVER_HOST=<tailnet or LAN address>`,
+  `API_SERVER_KEY=$(openssl rand -hex 32)` in `~/.hermes/.env`, restart the
+  gateway; put the same key in `~/.config/hermes/token` here and register
+  from the preset.
+
+## Standing decisions (new)
+
+- **Tailscale or LAN only.** No public-internet Hermes; the key travels as a
+  Bearer token over plain HTTP, so the network is the protection.
+- **MC gets its own Hermes session**, never the Telegram thread — Telegram's
+  allowlist doesn't apply to the API server, and shared history would leak
+  across channels.
+- **One registered agent per Hermes.** A second Hermes is a second agent
+  with its own base URL and key.
+- **MC → Hermes only.** Hermes calling MC agents is out of scope.
+- Follow-ups not built: streaming via `/api/sessions/<id>/chat/stream`,
+  per-agent display of Hermes's skills/toolsets (`/v1/skills`).
