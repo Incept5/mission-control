@@ -998,3 +998,29 @@ Tailscale approved on the Pi).
   — key file convention, mode 600, never printed.
 - Follow-ups not built: streaming (`stream: true` SSE), skills/tools
   surface, explicit `x-openclaw-session-key` control.
+
+---
+
+# Round 12 — direct request 2026-11-01
+
+The user kept getting Telegram "Hermes Mac mini went offline" / "Openclaw Pi
+went offline" alerts.
+
+### M30 — Offline-alert debounce and per-agent mute  ✅ shipped 2026-11-01
+- Cause: the Hermes and OpenClaw adapters probe `GET /v1/models` every 20s
+  (5s timeout) and flipped offline on a single miss; the notifier sends one
+  Telegram alert per online→offline transition, with no recovery message.
+  Any blip (Wi-Fi roam, laptop wake, busy gateway) pinged. Both agents going
+  offline together points at the laptop's network, not the remote hosts
+  (the mini was up 11 days, answering every probe). Server logs from the
+  alert times weren't available, so the exact trigger is unconfirmed.
+- Debounce (`8b69f48`): both adapters need 3 consecutive missed probes
+  (~1 minute) before going offline; one success resets the count.
+- Per-agent mute: `muteOffline` on the agent definition (PUT/POST body,
+  stored in the registry, shown in the Edit dialog as "Don't send a
+  Telegram alert when this agent goes offline"). Gates only the offline
+  alert in `ensureProbe`; the status dot, run alerts and the global
+  `agentOffline` switch are untouched.
+- Verified with a spy notifier on a scratch `MC_ROOT`: muted agent silent,
+  unmuted agent alerts once, unmuting restores the alert. The dialog
+  checkbox is `node --check`ed only — not browser-verified.

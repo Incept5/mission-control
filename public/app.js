@@ -646,6 +646,8 @@ async function openAgentForm(agent) {
   const descIn = el('input', { placeholder: 'What this agent is for' });
   descIn.value = agent?.description || '';
   const accentIn = el('input', { type: 'color', class: 'accent-in' });
+  const muteBox = el('input', { type: 'checkbox' });
+  muteBox.checked = !!agent?.muteOffline;
   accentIn.value = agent?.accent || ACCENT_PRESETS[state.agents.length % ACCENT_PRESETS.length];
   const swatches = el('div', { class: 'accent-swatches' },
     ACCENT_PRESETS.map((c) => el('button', {
@@ -1016,6 +1018,7 @@ async function openAgentForm(agent) {
       type: typeSel.value,
       description: descIn.value.trim(),
       accent: accentIn.value,
+      muteOffline: muteBox.checked,
       models: readModels(),
       pricing: {
         plan: planIn.value.trim(),
@@ -1069,6 +1072,7 @@ async function openAgentForm(agent) {
       editing ? field('Type', typeSel) : null,
       field('Description', descIn),
       field('Accent', el('div', { class: 'accent-row' }, accentIn, swatches)),
+      el('label', { class: 'check-row' }, muteBox, "Don't send a Telegram alert when this agent goes offline"),
     ),
   );
   const modelsNode = section('Models', 'Options for the instance model dropdown; values go to the CLI (claude --model). Leave empty for the adapter\'s defaults.',
