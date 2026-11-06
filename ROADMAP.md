@@ -1145,6 +1145,13 @@ means not wanted now.
 - Telegram voice notes are fetched, transcribed and treated as `/run` text
   (or a reply), with the transcript echoed back so mis-hearings are visible.
 - Needs a check of what run-complete alerts carry today before changing them.
+- `/skills <project>` (added 2026-11-06, built): lists what a Claude Code run
+  there can invoke as `/name` — the project's `.claude/skills` and
+  `.claude/commands`, then `~/.claude`, then names a live instance's CLI
+  reported — with a ready-to-use `/run` hint. Reads disk via `lib/skills.js`
+  (no instance needed); capped at 40 lines. Checked in the scratch harness
+  (23 checks total, incl. HTML-escaped descriptions, usage, unknown project).
+  Not yet checked against a real Telegram chat; uncommitted.
 
 ### M35 — Host MC on the Hermes Mac mini
 - Run `server.js` under launchd on the mini (KeepAlive, logs, `MC_ROOT`/data
