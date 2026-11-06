@@ -1024,3 +1024,159 @@ went offline" alerts.
 - Verified with a spy notifier on a scratch `MC_ROOT`: muted agent silent,
   unmuted agent alerts once, unmuting restores the alert. The dialog
   checkbox is `node --check`ed only — not browser-verified.
+
+### M31 — OpenAI-compatible model agent type (inferd)  ✅ shipped 2026-11-03
+- `lib/adapters/openai.js` (type `openai`, "OpenAI-compatible model"): a model
+  behind `/v1/chat/completions`, talked to directly — chat only, no tools.
+  Env `OPENAI_BASE_URL` (API root incl. `/v1`) + optional `OPENAI_API_KEY`.
+  - The server keeps no session, so MC does: each conversation's messages in
+    `data/openai-chats/<sessionId>.json`, resent whole every turn (inferd's
+    prefix cache serves the repeat: 1,120 of 1,213 prompt tokens cached on a
+    follow-up). A stopped or failed turn doesn't join the history; Clear
+    session deletes the file.
+  - Replies stream (`stream_options.include_usage`) as throttled partials;
+    `<think>` blocks and `reasoning_content` are dropped from the chat.
+  - Settings: Model (rows, else the first id `/v1/models` lists) and Thinking
+    (server default / off / on, sent as `chat_template_kwargs.enable_thinking`).
+  - Probe `GET /v1/models`, offline after 3 misses (as M30); `oneShot` for
+    suggestions; usage maps cached tokens to `cache_read_input_tokens`.
+- Presets: "inferd on the Hermes Mac mini" (`http://hermess-mac-mini:8300/v1`,
+  Qwen3.8-27B, free) and a blank OpenAI-compatible server. inferd's front end
+  binds the mini's tailnet address (`~/inference/start-inferd.sh` there).
+- Verified against the real inferd on the mini: 21-check adapter script
+  (streaming, recall across turns and across a reload, thinking on/off, stop
+  mid-turn, clear, oneShot, unreachable host, missing config) — the one miss
+  was a 30-token turn below inferd's 32-token cache block, re-checked with a
+  long context — then 5/5 E2E on a scratch `MC_ROOT` on port 1970 (register
+  from the preset, launch with a prompt, recall, status, clear). The register
+  dialog and streaming render were not browser-verified.
+
+### M32 — Claude Code on inferd (preset)  ✅ shipped 2026-11-03
+- Preset "inferd on the Hermes Mac mini" under `claude-code` in
+  `lib/presets.js`: `ANTHROPIC_BASE_URL` `http://hermess-mac-mini:8301`
+  (a LiteLLM proxy on the mini serving Anthropic `/v1/messages` in front of
+  inferd's OpenAI API), key `{ file: '~/.config/inferd/token' }`, all three
+  model roles pinned to `qwen3.8-27b`, `API_TIMEOUT_MS` 900000, free.
+- Proxy gotchas (LiteLLM 1.106.6, `~/inference/litellm.yaml` on the mini):
+  `openai/` models bridge through the Responses API (inferd has none, and
+  the bridge drops text next to reasoning) — use `hosted_vllm/` plus
+  `use_chat_completions_api`; Claude Code's effort `high` is rejected by the
+  Qwen3.8 template, so the proxy drops `reasoning_effort` and pins medium;
+  LiteLLM merges parallel tool calls that share one stream chunk into a
+  single tool_use block, so inferd's front end now streams one call per chunk.
+- Verified: `claude -p` FizzBuzz task (3 turns, 42 s), then on a scratch
+  `MC_ROOT` (port 1970) a two-bug fix with parallel Reads, Edit and Bash:
+  5 turns, 48 s, no mangled tool inputs, tests pass. Registered on the live
+  dashboard via the API; the preset shows in the register form after a restart.
+
+---
+
+# Round 13 — interview 2026-11-06 (instruct MC from the phone)
+
+Goal: send an instruction from the phone — "run agent A on project P with this
+prompt" — and get the answer back when the run finishes. Telegram already does
+fleet queries and `/send` to a *running* instance (M10); what is missing is
+launching on a project and a richer result. Answers were terse; unanswered
+means not wanted now.
+
+## Standing decisions (new)
+
+- **Telegram first, then a mobile web app.** Telegram long-polls, so it needs
+  no tunnel or new auth. The web app (B) comes after and brings real auth.
+- **Command shape: `/run <project> <agent> <prompt>`.** The agent is explicit;
+  no per-project default or last-used guessing.
+- **Sessions are reused.** `/run` targets the project's existing instance of
+  that agent and keeps its session; a fresh session only on an explicit
+  request (`/run --new …` or `/new <project> <agent>`).
+- **Results: summary plus more.** The run-complete message carries a short
+  summary; `/more` pages the full reply. Changed files and cost ride along.
+- **Mid-run questions and permission asks are answered from Telegram** (reply
+  to the prompt message), the same way run-alert replies route today.
+- **Permissions: the agent's current setting.** No phone-specific mode.
+- **No guardrails yet** (no confirm step, cost cap, or desktop-only projects).
+- **Short project aliases** (`fp` for fanfair-platform), stored on the
+  project, matched before fuzzy name matching.
+- **Voice notes become prompts** via the existing `/api/transcribe`.
+- **Say so when MC can't take the instruction.** If MC is down or the host is
+  asleep, the user is told rather than silently queued.
+- **MC moves to the Hermes Mac mini** so it is always available. This makes
+  "asleep" mostly a laptop-only case and changes several assumptions below.
+
+## Milestones
+
+### M33 — `/run` launches an agent on a project from Telegram  ✅ shipped 2026-11-06
+- `/run <project> <agent> <prompt>` resolves project (alias, then fuzzy) and
+  agent, reuses or launches the instance via `launchInstance`, and sends the
+  prompt. `--new` / `/new` starts a fresh session. Ambiguous or unknown refs
+  list the candidates, as `/send` does.
+- Project `alias` field: set in the project edit dialog and via the API.
+- Acknowledge at once ("started on <project>"), then deliver the result.
+- Shipped notes: `cmdRun` in `lib/telegram-bot.js`. Project match order:
+  alias, id, exact name, then a unique substring (ambiguity lists the
+  candidates); agents match on id/name the same way. `--new` is honoured
+  first or right after the agent, never inside the prompt; it clears the
+  session (refused while that instance is working — `/stop` first, or drop
+  it to queue). With several instances of one agent on a project, an idle
+  one wins, then the oldest. Launched runs carry the ✈ Telegram origin
+  (`launchInstance` takes `kind`). Alias: `normalizeAlias` (lowercase
+  `[a-z0-9-]`, ≤20, unique, empty clears), in the project dialog and chip.
+  The result still arrives as today's run-complete alert — the summary/more
+  form is M34.
+- Fixed on the way: the bot's own error messages (usage lines, ambiguity
+  lists) were HTML-escaped twice and showed literal `&lt;`; bot errors now
+  carry `html: true` and go out as written.
+- Verified on the laptop with a scratch `MC_ROOT` against a fake
+  OpenAI-compatible server (19 checks: launch, reuse with the history
+  growing 1→3→5 messages, `--new` both positions, `--new` in the prompt
+  ignored, second agent, unknown/ambiguous refs, usage, alias rules). The
+  real Telegram and the live 1969 dashboard were not touched.
+- Browser-verified (headless Chrome over CDP against a second instance on
+  port 1970, scratch `MC_ROOT`): the alias field shows in the edit dialog,
+  the chip shows on the card with its `/run <alias>` tooltip, a bad alias
+  gives the error toast. Found and fixed an old bug: after Save the page
+  stayed on the edit form, because the `projects` broadcast redraws before
+  the PUT returns while `projEdit` is still set; Save now redraws after
+  leaving edit mode.
+
+### M34 — Summary-plus-more results, mid-run replies, voice
+- Run-complete alert = short summary, changed files, cost; `/more` (or
+  replying "more") pages the full reply within the 4096-char limit.
+- Replying to a question/permission message answers it and resumes the run.
+- Telegram voice notes are fetched, transcribed and treated as `/run` text
+  (or a reply), with the transcript echoed back so mis-hearings are visible.
+- Needs a check of what run-complete alerts carry today before changing them.
+
+### M35 — Host MC on the Hermes Mac mini
+- Run `server.js` under launchd on the mini (KeepAlive, logs, `MC_ROOT`/data
+  dir, Node install). Reach the dashboard over Tailscale only.
+- **One Telegram poller only.** A second MC polling the same bot token gets
+  409s and steals updates; the laptop instance must have its bot token
+  removed or alerts/remote control disabled when the mini takes over.
+- **Projects must exist on the mini.** Registered project paths are laptop
+  paths; each project needs a checkout there (and the agents' CLIs, harness
+  files and token files: `~/.config/*/token`, Claude Code login). Decide per
+  project: clone on the mini, or leave it laptop-only.
+- Migrate `data/` (registry, instances, history) or start clean; the vault
+  path (M12–M14) must resolve on the mini.
+- Add a health/"is MC up" reply to `/status` so a down host is distinguishable
+  from a slow one (the user is told when it can't take instructions).
+
+### M36 — Mobile web app (B), after A
+- A phone-first view at `/m`: project and agent pickers, prompt box (with
+  voice), run list, result view with summary/more, answer prompts.
+- Needs auth (the dashboard has none today and the network is the only
+  protection) and reachability from the phone — Tailscale Serve on the mini.
+  Shape of auth decided when this milestone starts.
+
+## Recommended order
+
+M33 → M34 → M35 → M36. M35 could jump ahead of M34 if the user wants the
+always-on host sooner, but M33 on the laptop proves the command first, and
+the poller handover in M35 is easiest once `/run` is the only thing that
+matters on the phone.
+
+## Open questions
+
+- Which projects get checked out on the mini, and does the mini have the
+  Claude Code / Codex logins the laptop agents use?
+- Migrate the laptop's `data/` to the mini, or start fresh there?

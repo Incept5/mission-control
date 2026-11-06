@@ -1451,6 +1451,7 @@ function projectCard(p) {
   return el('div', { class: 'panel proj-card' },
     el('div', { class: 'proj-head' },
       el('strong', {}, p.name),
+      p.alias ? el('span', { class: 'proj-alias', title: 'Telegram alias: /run ' + p.alias + ' …' }, p.alias) : null,
       el('span', { class: 'proj-path' }, p.path),
     ),
     p.description ? el('div', { class: 'proj-desc' }, p.description) : null,
@@ -1480,6 +1481,7 @@ function projectForm(p) {
   const nameIn = el('input', { placeholder: 'Project name', value: p?.name || '' });
   const pathIn = el('input', { placeholder: '/absolute/path/to/project  (or ~/…)', value: p?.path || '' });
   const descIn = el('input', { placeholder: 'Description (optional)', value: p?.description || '' });
+  const aliasIn = el('input', { placeholder: 'e.g. fp (optional)', value: p?.alias || '', maxlength: 20 });
   return el('div', { class: 'panel proj-card' },
     el('h3', {}, p ? 'Edit project' : 'Register project'),
     el('div', { class: 'field' }, el('label', {}, 'Name'), nameIn),
@@ -1494,15 +1496,19 @@ function projectForm(p) {
       ),
     ),
     el('div', { class: 'field' }, el('label', {}, 'Description'), descIn),
+    el('div', { class: 'field' }, el('label', {}, 'Alias (Telegram: /run <alias> <agent> …)'), aliasIn),
     el('div', { class: 'btn-row' },
       el('button', {
         class: 'btn primary sm',
         onclick: async () => {
           try {
-            const body = { name: nameIn.value, path: pathIn.value, description: descIn.value };
+            const body = { name: nameIn.value, path: pathIn.value, description: descIn.value, alias: aliasIn.value };
             if (p) await api('/api/projects/' + p.id, { method: 'PUT', body });
             else await api('/api/projects', { method: 'POST', body });
+            // The projects broadcast lands before this response and redraws the
+            // form still in edit mode; leave edit mode and draw again.
             state.projEdit = null;
+            renderProjects();
             toast(p ? 'Project updated' : 'Project registered');
           } catch (err) { toast(err.message, true); }
         },

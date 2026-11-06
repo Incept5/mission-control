@@ -1404,3 +1404,5 @@ textarea.ghosted::placeholder { color: transparent; }
 .kv .v { text-align: right; }
 .an-table a { color: var(--accent); text-decoration: none; }
 .an-table a:hover { text-decoration: underline; }
+
+.proj-alias { font-size: 11px; padding: 1px 6px; border-radius: 8px; background: var(--panel-2, rgba(128,128,128,.18)); margin-left: 6px; }
