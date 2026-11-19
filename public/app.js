@@ -3814,7 +3814,7 @@ function renderChat(agent, body) {
   });
   input.addEventListener('input', () => {
     input.style.height = 'auto';
-    input.style.height = Math.min(input.scrollHeight, 160) + 'px';
+    input.style.height = Math.min(input.scrollHeight, 128) + 'px';
     state.drafts[agent.id] = input.value;
     updateSuggestGhost(agent.id);
     updateSlash();

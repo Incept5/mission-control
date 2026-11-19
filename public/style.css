@@ -562,7 +562,7 @@ a.hdr-chip:hover { color: var(--text); border-color: var(--accent); }
 
 .composer {
   display: flex; gap: 10px;
-  padding: 0 24px 20px;
+  padding: 0 24px 36px;
   align-items: flex-end;
   position: relative;
 }
@@ -641,9 +641,10 @@ a.hdr-chip:hover { color: var(--text); border-color: var(--accent); }
   border: 1px solid var(--border-bright);
   border-radius: 12px;
   color: var(--text);
-  font-family: var(--sans); font-size: 14px;
+  font-family: var(--sans); font-size: 14px; line-height: 1.45;
   padding: 12px 14px;
-  min-height: 48px; max-height: 160px;
+  /* 5 lines: 5 × 14px × 1.45 + 24px padding + 2px border */
+  min-height: 48px; max-height: 128px;
   outline: none;
 }
 .composer textarea:focus { border-color: var(--accent); }
